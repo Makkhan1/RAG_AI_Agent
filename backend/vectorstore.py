@@ -4,7 +4,10 @@ import os
 from pinecone import Pinecone, ServerlessSpec
 from langchain_pinecone import PineconeVectorStore
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_experimental.text_splitter import SemanticChunker
+
+# --- CHANGE 1: Import the new splitter ---
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+# from langchain_experimental.text_splitter import SemanticChunker # This is no longer needed
 
 # Import API keys from config
 from .config import PINECONE_API_KEY
@@ -14,30 +17,14 @@ os.environ["PINECONE_API_KEY"] = PINECONE_API_KEY
 
 # Initialize Pinecone client
 pc = Pinecone(api_key=PINECONE_API_KEY)
+
+# Define Hugging Face embedding model. This is still needed to create the vectors for Pinecone.
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+
+# Define Pinecone index name
 INDEX_NAME = "rag-index"
 
-# --- LAZY LOADING IMPLEMENTATION ---
-
-# 1. Create a global variable to hold the model, initialized to None.
-_embeddings_model = None
-
-def get_embeddings():
-    """
-    Lazily loads the embedding model to save memory on startup.
-    It will only be loaded into memory on the first call to this function.
-    Subsequent calls will return the already-loaded model.
-    """
-    global _embeddings_model
-    if _embeddings_model is None:
-        print("--- LAZY LOADING EMBEDDING MODEL ---")
-        # This is the line that uses a lot of RAM, but now it only runs once when needed.
-        _embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-        print("--- EMBEDDING MODEL LOADED ---")
-    return _embeddings_model
-
-# --- END OF LAZY LOADING IMPLEMENTATION ---
-
-
+# --- Retriever (Existing function) ---
 def get_retriever():
     """Initializes and returns the Pinecone vector store retriever."""
     if INDEX_NAME not in pc.list_indexes().names():
@@ -50,37 +37,38 @@ def get_retriever():
         )
         print(f"Created new Pinecone index: {INDEX_NAME}")
     
-    # Use the lazy loading function here
-    vectorstore = PineconeVectorStore(index_name=INDEX_NAME, embedding=get_embeddings())
+    vectorstore = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
     return vectorstore.as_retriever()
 
-
+# --- Function to add documents to the vector store ---
 def add_document_to_vectorstore(text_content: str):
     """
     Adds a single text document to the Pinecone vector store.
-    Splits the text into semantically coherent chunks before embedding and upserting.
+    Splits the text using a recursive character-based method before embedding and upserting.
     """
     if not text_content:
         raise ValueError("Document content cannot be empty.")
 
-    # This line ensures the index exists before we try to add documents to it.
+    # Ensure the index exists before we try to add documents to it.
     get_retriever()
 
-    # Use the lazy loading function to get the embeddings model
-    embeddings = get_embeddings()
-    
-    # Use the SemanticChunker with the now-loaded embeddings
-    text_splitter = SemanticChunker(
-        embeddings, 
-        breakpoint_threshold_type="percentile",
-        breakpoint_threshold_amount=95
+    # --- CHANGE 2: Replace SemanticChunker with RecursiveCharacterTextSplitter ---
+    # This splitter is lightweight and does not require an embedding model to run.
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=500,      # The target size of each chunk in characters
+        chunk_overlap=200,    # The number of characters to overlap between chunks
+        add_start_index=True, # Adds the starting character index to metadata
     )
     
     documents = text_splitter.create_documents([text_content])
-    print(f"Splitting document into {len(documents)} semantically coherent chunks for indexing...")
     
-    # Use the lazy loading function again to initialize the vectorstore for writing
+    # --- CHANGE 3: Updated print statement for clarity ---
+    print(f"Splitting document into {len(documents)} chunks for indexing...")
+    
+    # Get the vectorstore instance (not the retriever) to add documents
     vectorstore = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
     
+    # Add documents to the vector store.
+    # The embedding model is used here, not during splitting.
     vectorstore.add_documents(documents)
     print(f"Successfully added {len(documents)} chunks to Pinecone index '{INDEX_NAME}'.")

@@ -15,7 +15,9 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # Embedding Model
-EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-albert-small-v2")
+# EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/paraphrase-albert-small-v2")
 
 # Paths (adjust as needed)
 DOC_SOURCE_DIR = os.getenv("DOC_SOURCE_DIR", "data")
+
+JINA_API_KEY=os.getenv("JINA_API_KEY")

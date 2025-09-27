@@ -31,7 +31,7 @@ def get_embeddings_model():
     if _EMBEDDINGS is None:
         print("Loading embeddings model for the first time...")
         _EMBEDDINGS = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+            model_name="sentence-transformers/paraphrase-albert-small-v2"
         )
         print("Embeddings model loaded.")
     return _EMBEDDINGS
@@ -46,7 +46,7 @@ def get_retriever():
         print(f"Creating new Pinecone index: {INDEX_NAME}...")
         pc.create_index(
             name=INDEX_NAME,
-            dimension=384, # Correct dimension for 'all-MiniLM-L6-v2'
+            dimension=768, # Correct dimension for 'all-MiniLM-L6-v2'
             metric="cosine",
             spec=ServerlessSpec(cloud='aws', region='us-east-1')
         )
@@ -72,8 +72,8 @@ def add_document_to_vectorstore(text_content: str):
     get_retriever()
 
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=500,
-        chunk_overlap=200,
+        chunk_size=600,
+        chunk_overlap=150,
         add_start_index=True,
     )
     

@@ -62,7 +62,7 @@ class RagJudge(BaseModel):
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 
 router_llm = ChatOpenAI(
-    model_name="x-ai/grok-4-fast:free",
+    model_name="qwen/qwen3-4b:free",
     openai_api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://openrouter.ai/api/v1"
 ).with_structured_output(RouteDecision)
@@ -74,7 +74,7 @@ judge_llm = ChatOpenAI(
 ).with_structured_output(RagJudge)
 
 answer_llm = ChatOpenAI(
-    model_name="x-ai/grok-4-fast:free",
+    model_name="qwen/qwen3-4b:free",
     openai_api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://openrouter.ai/api/v1"
 )

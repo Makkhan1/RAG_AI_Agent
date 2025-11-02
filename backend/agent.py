@@ -1,133 +1,383 @@
-# Update the _process_chat_request function in backend/main.py
+# rag_agent_app/backend/agent.py
 
-async def _process_chat_request(request: QueryRequest) -> AgentResponse:
-    """Helper function to process chat request"""
-    trace_events_for_frontend: List[TraceEvent] = []
+import os
+from typing import Dict, Any
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.runnables import RunnablePassthrough
+from langchain_groq import ChatGroq
+
+# FIXED: Correct Tavily import
+try:
+    from langchain_community.tools.tavily_search import TavilySearchResults
+    TAVILY_AVAILABLE = True
+except ImportError:
+    try:
+        from langchain_tavily import TavilySearchResults
+        TAVILY_AVAILABLE = True
+    except ImportError:
+        TAVILY_AVAILABLE = False
+        print("Warning: Tavily search not available")
+
+from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
+
+from .config import GROQ_API_KEY, TAVILY_API_KEY
+from .vectorstore import get_retriever, check_vectorstore_health
+
+# Set API Keys as environment variables
+os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+if TAVILY_AVAILABLE and TAVILY_API_KEY:
+    os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
+
+# Initialize LLM
+llm = ChatGroq(
+    model="llama-3.1-70b-versatile",
+    temperature=0,
+    max_tokens=None,
+    timeout=None,
+    max_retries=2,
+)
+
+# FIXED: Initialize Tavily search tool
+if TAVILY_AVAILABLE and TAVILY_API_KEY:
+    web_search_tool = TavilySearchResults(max_results=3)
+else:
+    web_search_tool = None
+    print("Warning: Web search disabled - Tavily not available or API key missing")
+
+# Define the state structure
+class AgentState(Dict[str, Any]):
+    messages: list
+    route: str = ""
+    rag: str = ""
+    web: str = ""
+    rag_verdict_is_sufficient: bool = False
+    initial_router_decision: str = ""
+    router_override_reason: str = ""
+    web_search_enabled: bool = True
+
+# Router node
+def router(state: AgentState) -> AgentState:
+    """Route the conversation to either RAG lookup or direct answer."""
+    print("--- Entering router_node ---")
+    
+    messages = state["messages"]
+    last_message = messages[-1].content
+    
+    print(f"Router analyzing query: {last_message}")
     
     try:
-        config = {
-            "configurable": {
-                "thread_id": request.session_id,
-                "web_search_enabled": request.enable_web_search
-            }
-        }
-        inputs = {
-            "messages": [HumanMessage(content=request.query)],
-            "web_search_enabled": request.enable_web_search
-        }
-
-        final_message = ""
-        final_state = None
+        # Check if vectorstore is healthy
+        is_healthy, health_msg = check_vectorstore_health()
         
-        print(f"--- Starting Agent Stream for session {request.session_id} ---")
-        print(f"Web Search Enabled: {request.enable_web_search}")
-
-        # Run agent stream in thread pool to avoid blocking
-        stream_generator = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: list(rag_agent.stream(inputs, config=config))
-        )
-
-        for i, s in enumerate(stream_generator):
-            # Store the final state
-            final_state = s
+        if is_healthy:
+            decision = "rag"
+            print(f"Router decision: {decision} (vectorstore is healthy)")
+        else:
+            print(f"Vectorstore not healthy: {health_msg}")
+            decision = "web" if state.get("web_search_enabled", True) and web_search_tool else "answer"
+            print(f"Router decision: {decision} (bypassing unhealthy vectorstore)")
             
-            current_node_name = None
-            node_output_state = None
-
-            if '__end__' in s:
-                current_node_name = '__end__'
-                node_output_state = s['__end__']
-            else:
-                current_node_name = list(s.keys())[0] 
-                node_output_state = s[current_node_name]
-
-            event_description = f"Executing node: {current_node_name}"
-            event_details = {}
-            event_type = "generic_node_execution"
-
-            if current_node_name == "router":
-                route_decision = node_output_state.get('route')
-                initial_decision = node_output_state.get('initial_router_decision', route_decision)
-                override_reason = node_output_state.get('router_override_reason', None)
-
-                if override_reason:
-                    event_description = f"Router initially decided: '{initial_decision}'. Overridden to: '{route_decision}' because {override_reason}."
-                    event_details = {"initial_decision": initial_decision, "final_decision": route_decision, "override_reason": override_reason}
-                else:
-                    event_description = f"Router decided: '{route_decision}'"
-                    event_details = {"decision": route_decision, "reason": "Based on initial query analysis."}
-                event_type = "router_decision"
-            
-            elif current_node_name == "rag_lookup":
-                rag_content_summary = node_output_state.get("rag", "")[:200] + "..." if node_output_state.get("rag", "") else "No content"
-                rag_sufficient = node_output_state.get("rag_verdict_is_sufficient", False)
-                
-                if rag_sufficient:
-                    event_description = "RAG Lookup: Content found and judged SUFFICIENT. Proceeding to answer."
-                    event_details = {"retrieved_content_summary": rag_content_summary, "sufficiency_verdict": "Sufficient"}
-                else:
-                    next_route = node_output_state.get("route")
-                    if next_route == "web":
-                        event_description = "RAG Lookup: Content judged NOT SUFFICIENT. Diverting to web search."
-                    else:
-                        event_description = "RAG Lookup: Content judged NOT SUFFICIENT. Proceeding to answer as fallback."
-                    event_details = {"retrieved_content_summary": rag_content_summary, "sufficiency_verdict": "Not Sufficient"}
-                
-                event_type = "rag_action"
-
-            elif current_node_name == "web_search":
-                web_content_summary = node_output_state.get("web", "")[:200] + "..." if node_output_state.get("web", "") else "No content"
-                event_description = "Web Search performed. Results retrieved. Proceeding to answer."
-                event_details = {"retrieved_content_summary": web_content_summary}
-                event_type = "web_action"
-            elif current_node_name == "answer":
-                event_description = "Generating final answer using gathered context."
-                event_type = "answer_generation"
-            elif current_node_name == "__end__":
-                event_description = "Agent process completed."
-                event_type = "process_end"
-
-            trace_events_for_frontend.append(
-                TraceEvent(
-                    step=i + 1,
-                    node_name=current_node_name,
-                    description=event_description,
-                    details=event_details,
-                    event_type=event_type
-                )
-            )
-            print(f"Streamed Event: Step {i+1} - Node: {current_node_name} - Desc: {event_description}")
-
-        # FIXED: Better final message extraction
-        if final_state:
-            # Check for __end__ state first
-            if '__end__' in final_state:
-                state_dict = final_state['__end__']
-            else:
-                # Get the last node's state
-                node_name = list(final_state.keys())[0]
-                state_dict = final_state[node_name]
-            
-            # Extract the final message
-            if "messages" in state_dict and state_dict["messages"]:
-                # Get the last AI message
-                for msg in reversed(state_dict["messages"]):
-                    if isinstance(msg, AIMessage) and msg.content.strip():
-                        final_message = msg.content
-                        break
-        
-        # FIXED: Fallback if no message found
-        if not final_message:
-            final_message = "Hello! I'm here to help. You can ask me questions about uploaded documents or anything else you'd like to know."
-            print("No final message found, using fallback greeting.")
-
-        print(f"--- Agent Stream Ended. Final Response: {final_message[:200]}... ---")
-
-        return AgentResponse(response=final_message, trace_events=trace_events_for_frontend)
-
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        error_details = f"Error during agent invocation: {e}"
-        print(error_details)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal Server Error: {e}")
+        print(f"Router error: {e}")
+        decision = "web" if state.get("web_search_enabled", True) and web_search_tool else "answer"
+        print(f"Router decision: {decision} (error fallback)")
+    
+    state["route"] = decision
+    state["initial_router_decision"] = decision
+    
+    print(f"--- Exiting router_node with route: {decision} ---")
+    return state
+
+# RAG lookup node
+def rag_lookup(state: AgentState) -> AgentState:
+    """Retrieve relevant documents and determine if sufficient for answering."""
+    print("--- Entering rag_node ---")
+    
+    query = state["messages"][-1].content
+    print(f"RAG query: {query}")
+    
+    try:
+        # Get retriever
+        retriever = get_retriever()
+        
+        # Retrieve relevant documents
+        rag_docs = retriever.get_relevant_documents(query)
+        
+        if rag_docs:
+            # Combine all retrieved content
+            rag_content = "\n\n".join([doc.page_content for doc in rag_docs])
+            state["rag"] = rag_content
+            
+            print(f"Retrieved {len(rag_docs)} documents from RAG")
+            
+            # Create a prompt to determine if the content is sufficient
+            sufficiency_prompt = f"""
+            Based on the following retrieved content, can you answer the user's question: "{query}"?
+            
+            Retrieved Content:
+            {rag_content[:2000]}...
+            
+            Respond with only "SUFFICIENT" if the content contains enough information to answer the question,
+            or "NOT_SUFFICIENT" if more information is needed.
+            """
+            
+            try:
+                # Ask LLM if content is sufficient
+                sufficiency_response = llm.invoke([HumanMessage(content=sufficiency_prompt)])
+                verdict = sufficiency_response.content.strip().upper()
+                
+                if "SUFFICIENT" in verdict:
+                    state["rag_verdict_is_sufficient"] = True
+                    state["route"] = "answer"
+                    print("RAG content judged as SUFFICIENT. Proceeding to answer.")
+                else:
+                    state["rag_verdict_is_sufficient"] = False
+                    if state.get("web_search_enabled", True) and web_search_tool:
+                        state["route"] = "web"
+                        print("RAG content judged as NOT SUFFICIENT. Proceeding to web search.")
+                    else:
+                        state["route"] = "answer"
+                        print("RAG content judged as NOT SUFFICIENT. Web search disabled. Proceeding to answer anyway.")
+                        
+            except Exception as e:
+                print(f"Error in sufficiency check: {e}. Defaulting to NOT SUFFICIENT.")
+                state["rag_verdict_is_sufficient"] = False
+                state["route"] = "web" if state.get("web_search_enabled", True) and web_search_tool else "answer"
+        else:
+            print("No documents retrieved from RAG")
+            state["rag"] = ""
+            state["rag_verdict_is_sufficient"] = False
+            state["route"] = "web" if state.get("web_search_enabled", True) and web_search_tool else "answer"
+            
+    except Exception as e:
+        print(f"RAG Error: RAG_ERROR::{e}. Checking web search enabled status.")
+        
+        # Set empty RAG content and route to web search or answer
+        state["rag"] = ""
+        state["rag_verdict_is_sufficient"] = False
+        
+        if state.get("web_search_enabled", True) and web_search_tool:
+            state["route"] = "web"
+            print("Routing to web search due to RAG error.")
+        else:
+            state["route"] = "answer"
+            print("Routing to answer due to RAG error and web search disabled.")
+    
+    print("--- Exiting rag_node ---")
+    return state
+
+# FIXED: Web search node with proper error handling
+def web_search(state: AgentState) -> AgentState:
+    """Perform web search to gather additional information."""
+    print("--- Entering web_node ---")
+    
+    query = state["messages"][-1].content
+    print(f"Web search query: {query}")
+    
+    if not web_search_tool:
+        print("Web search tool not available")
+        state["web"] = "Web search is not available"
+        state["route"] = "answer"
+        print("--- Exiting web_node (no tool available) ---")
+        return state
+    
+    try:
+        # FIXED: Use the correct method call for TavilySearchResults
+        web_results = web_search_tool.invoke({"query": query})
+        
+        # Format the results
+        if isinstance(web_results, list) and web_results:
+            formatted_results = []
+            for result in web_results:
+                if isinstance(result, dict):
+                    title = result.get("title", "No title")
+                    content = result.get("content", "No content")
+                    url = result.get("url", "No URL")
+                    formatted_results.append(f"Title: {title}\nContent: {content}\nURL: {url}")
+                else:
+                    formatted_results.append(str(result))
+            
+            web_content = "\n\n".join(formatted_results)
+        else:
+            web_content = str(web_results)
+        
+        state["web"] = web_content
+        state["route"] = "answer"
+        
+        print(f"Web snippets retrieved: {web_content[:200]}...")
+        
+    except Exception as e:
+        print(f"Web search error: {e}")
+        state["web"] = f"Web search failed: {e}"
+        state["route"] = "answer"
+    
+    print("--- Exiting web_node ---")
+    return state
+
+# FIXED: Answer generation node with better response handling
+def answer_node(state: AgentState) -> AgentState:
+    """Generate the final answer using available context."""
+    print("--- Entering answer_node ---")
+    
+    query = state["messages"][-1].content
+    rag_content = state.get("rag", "")
+    web_content = state.get("web", "")
+    
+    print(f"Generating answer for query: {query}")
+    print(f"RAG content available: {bool(rag_content)}")
+    print(f"Web content available: {bool(web_content)}")
+    
+    # Build context from available sources
+    context_parts = []
+    
+    if rag_content:
+        context_parts.append(f"Document Knowledge Base:\n{rag_content}")
+    
+    if web_content and not web_content.startswith("Web search failed") and web_content != "Web search is not available":
+        context_parts.append(f"Web Search Results:\n{web_content}")
+    
+    if context_parts:
+        context = "\n\n---\n\n".join(context_parts)
+        
+        prompt = f"""You are a helpful assistant that answers questions based on the provided context.
+Please provide a clear and helpful answer to the user's question using the context below.
+
+Context:
+---
+{context}
+---
+
+Question: {query}
+
+Answer:"""
+
+    else:
+        # Handle simple greetings and basic questions
+        if query.lower().strip() in ["hi", "hello", "hey", "how are you", "what's up"]:
+            prompt = f"""The user greeted you with: "{query}"
+
+Please respond with a friendly greeting and let them know how you can help them. You can:
+- Answer questions about uploaded documents
+- Search the web for current information
+- Provide explanations on various topics
+
+Give a warm, helpful response."""
+        else:
+            prompt = f"""The user asked: "{query}"
+
+Unfortunately, I don't have access to relevant information in my knowledge base for this specific question, and web search didn't return useful results.
+
+Please provide a helpful response that:
+1. Acknowledges their question
+2. Explains that you need more context or documents
+3. Suggests they can upload relevant documents or try rephrasing their question
+4. Offers to help with other questions
+
+Be friendly and helpful."""
+
+    print(f"Sending prompt to LLM (first 200 chars): {prompt[:200]}...")
+    
+    try:
+        # Generate response
+        response = llm.invoke([HumanMessage(content=prompt)])
+        final_answer = response.content
+        
+        # FIXED: Ensure we have a valid response
+        if not final_answer or final_answer.strip() == "":
+            final_answer = "I apologize, but I couldn't generate a proper response. Please try rephrasing your question or ask me something else."
+        
+        print(f"Generated answer (first 200 chars): {final_answer[:200]}...")
+        
+        # FIXED: Add the AI response to messages - this is crucial!
+        state["messages"].append(AIMessage(content=final_answer))
+        print(f"Added AI message to state. Total messages now: {len(state['messages'])}")
+        
+    except Exception as e:
+        error_msg = f"I apologize, but I encountered an error while generating a response: {str(e)}"
+        print(f"Error in answer generation: {e}")
+        state["messages"].append(AIMessage(content=error_msg))
+    
+    print("--- Exiting answer_node ---")
+    return state
+
+# Conditional routing function
+def route_question(state: AgentState) -> str:
+    """Determine the next node based on the current route."""
+    route = state.get("route", "")
+    print(f"Routing to: {route}")
+    
+    if route == "rag":
+        return "rag_lookup"
+    elif route == "web":
+        return "web_search"
+    elif route == "answer":
+        return "answer"
+    else:
+        print(f"Unknown route: {route}, defaulting to answer")
+        return "answer"
+
+# Build the graph
+def create_agent_graph():
+    """Create and return the agent graph."""
+    
+    # Create the graph
+    workflow = StateGraph(AgentState)
+    
+    # Add nodes
+    workflow.add_node("router", router)
+    workflow.add_node("rag_lookup", rag_lookup)
+    workflow.add_node("web_search", web_search)
+    workflow.add_node("answer", answer_node)
+    
+    # Set entry point
+    workflow.set_entry_point("router")
+    
+    # Add conditional routing
+    workflow.add_conditional_edges(
+        "router",
+        route_question,
+        {
+            "rag_lookup": "rag_lookup",
+            "web_search": "web_search", 
+            "answer": "answer"
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "rag_lookup",
+        route_question,
+        {
+            "web_search": "web_search",
+            "answer": "answer"
+        }
+    )
+    
+    # Direct edges to end
+    workflow.add_edge("web_search", "answer")
+    workflow.add_edge("answer", END)
+    
+    # Compile the graph with memory
+    memory = MemorySaver()
+    return workflow.compile(checkpointer=memory)
+
+# Create the agent
+rag_agent = create_agent_graph()
+
+# Test function
+def test_agent():
+    """Test the agent with a simple query."""
+    try:
+        config = {"configurable": {"thread_id": "test_thread"}}
+        inputs = {"messages": [HumanMessage(content="Hello, can you help me?")]}
+        
+        for step in rag_agent.stream(inputs, config=config):
+            print(f"Step: {step}")
+            
+        return True
+    except Exception as e:
+        print(f"Agent test failed: {e}")
+        return False
+
+if __name__ == "__main__":
+    test_agent()

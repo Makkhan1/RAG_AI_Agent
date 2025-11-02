@@ -3,7 +3,7 @@
 import streamlit as st
 import time
 from backend_api import upload_document_with_progress, check_backend_health, check_vectorstore_health
-from session_manager import track_error, reset_error_count, track_upload, should_show_help, get_session_stats
+from session_manager import track_error, reset_error_count, track_upload, should_show_help, get_session_stats, reset_session
 from config import FRONTEND_CONFIG
 
 def display_header():
@@ -11,8 +11,7 @@ def display_header():
     st.set_page_config(
         page_title="AI Agent Chatbot", 
         layout="wide",
-        page_icon="🤖",
-        initial_sidebar_state="expanded"
+        page_icon="🤖"
     )
     
     st.title("🤖 AI Agent Chatbot")
@@ -25,14 +24,13 @@ def display_header():
     - 💡 Providing detailed explanations with source tracing
     """)
     
-    # Show help if user is having issues
     if should_show_help():
         st.warning("""
         **Having trouble?** Here are some tips:
         - Make sure your PDF files are smaller than 50MB
         - Wait for uploads to complete before asking questions
         - Try shorter, more specific questions
-        - Check that the backend server is online (green status below)
+        - Check that the backend server is online
         """)
     
     st.markdown("---")
@@ -49,7 +47,7 @@ def display_backend_status(fastapi_base_url: str):
             st.success("🟢 Backend Online")
         else:
             st.error("🔴 Backend Offline")
-            st.info("💡 If using Render, the backend may take 1-2 minutes to wake up from sleep.")
+            st.info("💡 The backend may take 1-2 minutes to wake up.")
     
     with col2:
         st.subheader("🗃️ Vectorstore Status")
@@ -57,28 +55,22 @@ def display_backend_status(fastapi_base_url: str):
             vectorstore_healthy, vectorstore_msg = check_vectorstore_health(fastapi_base_url)
             
             if vectorstore_healthy:
-                st.success(f"🟢 Vectorstore Healthy")
-                st.caption(vectorstore_msg)
+                st.success("🟢 Vectorstore Healthy")
             else:
-                st.warning(f"🟡 Vectorstore Issues")
-                st.caption(vectorstore_msg)
+                st.warning("🟡 Vectorstore Issues")
+            st.caption(vectorstore_msg)
         else:
             st.info("❓ Cannot check - backend offline")
     
     return backend_healthy
 
 def render_document_upload_section(fastapi_base_url: str):
-    """
-    Renders the UI for uploading PDF documents to the knowledge base.
-    Handles file upload and API call to the backend with improved UX.
-    """
+    """Renders the UI for uploading PDF documents."""
     st.header("📤 Upload Document to Knowledge Base")
     
-    # Check backend status first
     backend_healthy = check_backend_health(fastapi_base_url)
-    
-    # Show upload statistics
     stats = get_session_stats()
+    
     if stats["upload_count"] > 0:
         st.info(f"📊 Documents uploaded this session: {stats['upload_count']}")
     
@@ -89,7 +81,6 @@ def render_document_upload_section(fastapi_base_url: str):
                 st.rerun()
             return
         
-        # File uploader with validation
         uploaded_file = st.file_uploader(
             "Choose a PDF file", 
             type="pdf", 
@@ -97,7 +88,6 @@ def render_document_upload_section(fastapi_base_url: str):
             help="Supported: PDF files up to 50MB"
         )
         
-        # Show file info if file is selected
         if uploaded_file is not None:
             file_size = len(uploaded_file.getvalue())
             file_size_mb = file_size / (1024 * 1024)
@@ -117,14 +107,11 @@ def render_document_upload_section(fastapi_base_url: str):
         else:
             upload_disabled = True
         
-        # Upload button with validation
         if st.button("📤 Upload PDF", key="upload_pdf_button", disabled=upload_disabled):
             if uploaded_file is not None:
                 try:
-                    # Upload with progress
                     upload_data = upload_document_with_progress(fastapi_base_url, uploaded_file)
                     
-                    # Success message
                     st.success(f"""
                     ✅ **Upload Successful!**
                     - File: {upload_data.get('filename')}
@@ -132,11 +119,9 @@ def render_document_upload_section(fastapi_base_url: str):
                     - Status: Ready for questions!
                     """)
                     
-                    # Track successful upload
                     track_upload()
                     reset_error_count()
                     
-                    # Auto-clear file uploader after successful upload
                     time.sleep(2)
                     st.rerun()
                     
@@ -145,31 +130,24 @@ def render_document_upload_section(fastapi_base_url: str):
                     st.error(f"❌ Upload failed: {error_msg}")
                     track_error()
                     
-                    # Provide specific help based on error type
                     if "timeout" in error_msg.lower():
-                        st.info("💡 **Tip:** Large files may take several minutes to process. Try a smaller file or wait and retry.")
+                        st.info("💡 **Tip:** Large files may take several minutes. Try a smaller file.")
                     elif "connection" in error_msg.lower() or "502" in error_msg:
-                        st.info("💡 **Tip:** The backend server may be starting up. Please wait 1-2 minutes and try again.")
+                        st.info("💡 **Tip:** Backend may be starting up. Wait 1-2 minutes and try again.")
                     elif "too large" in error_msg.lower():
                         st.info("💡 **Tip:** Please use a PDF file smaller than 50MB.")
-                    elif "backend" in error_msg.lower():
-                        st.info("💡 **Tip:** Wait for the backend to come online (check status above) and try again.")
             else:
                 st.warning("⚠️ Please select a PDF file before clicking 'Upload PDF'.")
     
     st.markdown("---")
 
 def render_agent_settings_section():
-    """
-    Renders the section for agent settings, including the web search toggle.
-    Updates the 'web_search_enabled' flag in session state.
-    """
+    """Renders the section for agent settings."""
     st.header("⚙️ Agent Settings")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        # Web search toggle
         web_search_enabled = st.checkbox(
             "🌐 Enable Web Search", 
             value=st.session_state.web_search_enabled,
@@ -177,16 +155,13 @@ def render_agent_settings_section():
         )
         st.session_state.web_search_enabled = web_search_enabled
         
-        # Show web search status
         if web_search_enabled:
             st.success("🌐 Web search is **enabled**")
         else:
             st.warning("📚 Only using **uploaded documents**")
     
     with col2:
-        # Session controls
         if st.button("🔄 New Session"):
-            from session_manager import reset_session
             reset_session()
             st.success("✅ New session started!")
             st.rerun()
@@ -205,30 +180,21 @@ def render_agent_settings_section():
 
 def display_chat_history():
     """Displays all messages currently in the session state chat history."""
-    for i, message in enumerate(st.session_state.messages):
+    for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
-            
-            # Add timestamp for recent messages
-            if i >= len(st.session_state.messages) - 5:  # Last 5 messages
-                st.caption(f"_{time.strftime('%H:%M:%S')}_")
 
 def display_trace_events(trace_events: list):
-    """
-    Renders the detailed agent workflow trace in an expandable section.
-    Uses icons and conditional styling for better readability.
-    """
+    """Renders the detailed agent workflow trace."""
     if not trace_events:
         return
         
     with st.expander(f"🔬 Agent Workflow Trace ({len(trace_events)} steps)", expanded=False):
-        # Summary of the workflow
         nodes_used = [event['node_name'] for event in trace_events if event['node_name'] != '__end__']
-        unique_nodes = list(dict.fromkeys(nodes_used))  # Preserve order, remove duplicates
+        unique_nodes = list(dict.fromkeys(nodes_used))
         
         st.info(f"**Workflow Path:** {' → '.join(unique_nodes)}")
         
-        # Detailed trace
         for event in trace_events:
             icon_map = {
                 'router': "🎯",
@@ -239,19 +205,15 @@ def display_trace_events(trace_events: list):
             }
             icon = icon_map.get(event['node_name'], "⚙️")
             
-            # Create expandable section for each step
             with st.expander(f"{icon} Step {event['step']}: {event['node_name'].title()}", expanded=False):
                 st.write(f"**Description:** {event['description']}")
                 
-                # Special handling for different node types
                 if event['node_name'] == 'rag_lookup' and 'sufficiency_verdict' in event['details']:
                     verdict = event['details']['sufficiency_verdict']
                     if verdict == "Sufficient":
                         st.success(f"**RAG Verdict:** {verdict} ✅")
-                        st.write("📚 Found relevant information in uploaded documents.")
                     else:
                         st.warning(f"**RAG Verdict:** {verdict} ⚠️")
-                        st.write("🔍 Insufficient information found, proceeding to web search.")
                     
                     if 'retrieved_content_summary' in event['details']:
                         with st.expander("📄 Retrieved Content Preview"):
@@ -265,34 +227,9 @@ def display_trace_events(trace_events: list):
                 elif event['node_name'] == 'router':
                     decision = event['details'].get('decision', 'Unknown')
                     st.info(f"**Routing Decision:** {decision}")
-                    
-                    if 'override_reason' in event['details']:
-                        st.warning(f"**Override Reason:** {event['details']['override_reason']}")
-                        
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.write(f"**Initial:** {event['details'].get('initial_decision', 'N/A')}")
-                        with col2:
-                            st.write(f"**Final:** {event['details'].get('final_decision', 'N/A')}")
                 
-                elif event['node_name'] == 'answer':
-                    st.success("💡 Generating final response using gathered context")
-                
-                elif event['node_name'] == '__end__':
-                    st.success("✅ Agent workflow completed successfully")
-                
-                # Show raw details if available and not already displayed
-                if event['details'] and event['node_name'] not in ['rag_lookup', 'web_search', 'router']:
+                if event['details']:
                     with st.expander("🔧 Technical Details"):
                         st.json(event['details'])
         
-        # Performance summary
-        total_steps = len(trace_events)
-        processing_time = "~1-2 minutes"  # Estimate
-        
-        st.success(f"""
-        **Workflow Summary:**
-        - Total Steps: {total_steps}
-        - Processing Time: {processing_time}
-        - Status: Completed Successfully ✅
-        """)
+        st.success(f"**Workflow completed successfully with {len(trace_events)} steps** ✅")

@@ -1,248 +1,202 @@
 # rag_agent_app/backend/agent.py
 
 import os
-from typing import List, Literal, TypedDict
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
-from langchain_tavily import TavilySearch
-from pydantic import BaseModel, Field
+from typing import Dict, Any
+from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.runnables import RunnablePassthrough
+from langchain_groq import ChatGroq
+from langchain_tavily import TavilySearchAPIWrapper
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.runnables import RunnableConfig
 
-# Import the lazy-loading retriever function
-from .vectorstore import get_retriever
-# Import API keys from config
 from .config import GROQ_API_KEY, TAVILY_API_KEY
+from .vectorstore import get_retriever, check_vectorstore_health
 
-# --- Tools ---
-os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
-tavily = TavilySearch(max_results=3, topic="general")
-
-@tool
-def web_search_tool(query: str) -> str:
-    """Up-to-date web info via Tavily"""
-    try:
-        result = tavily.invoke({"query": query})
-        if isinstance(result, dict) and 'results' in result:
-            formatted_results = []
-            for item in result['results']:
-                title = item.get('title', 'No title')
-                content = item.get('content', 'No content')
-                url = item.get('url', '')
-                formatted_results.append(f"Title: {title}\nContent: {content}\nURL: {url}")
-            return "\n\n".join(formatted_results) if formatted_results else "No results found"
-        else:
-            return str(result)
-    except Exception as e:
-        return f"WEB_ERROR::{e}"
-
-@tool
-def rag_search_tool(query: str) -> str:
-    """Top-K chunks from KB (empty string if none)"""
-    try:
-        # This now uses the lazy-loading retriever
-        retriever_instance = get_retriever()
-        # <-- CHANGED: Increased k to retrieve more documents and improve recall -->
-        docs = retriever_instance.invoke(query, k=10)
-        return "\n\n".join(d.page_content for d in docs) if docs else ""
-    except Exception as e:
-        return f"RAG_ERROR::{e}"
-
-# --- Pydantic schemas for structured output ---
-class RouteDecision(BaseModel):
-    route: Literal["rag", "web", "answer", "end"]
-    reply: str | None = Field(None, description="Filled only when route == 'end'")
-
-class RagJudge(BaseModel):
-    sufficient: bool = Field(..., description="True if retrieved information is sufficient to answer the user's question, False otherwise.")
-
-# --- LLM instances with structured output where needed ---
+# Set API Keys as environment variables
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 
-router_llm = ChatOpenAI(
-    model_name="meta-llama/llama-3.3-8b-instruct:free",
-    openai_api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-).with_structured_output(RouteDecision)
-
-judge_llm = ChatOpenAI(
-    model_name="cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
-    openai_api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-).with_structured_output(RagJudge)
-
-answer_llm = ChatOpenAI(
-    model_name="meta-llama/llama-3.3-8b-instruct:free",
-    openai_api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
+# Initialize LLM
+llm = ChatGroq(
+    model="llama-3.1-70b-versatile",
+    temperature=0,
+    max_tokens=None,
+    timeout=None,
+    max_retries=2,
 )
 
-# --- Shared state type ---
-class AgentState(TypedDict, total=False):
-    messages: List[BaseMessage]
-    route: Literal["rag", "web", "answer", "end"]
-    rag: str
-    web: str
-    web_search_enabled: bool
-    # <-- CHANGED: Added field to pass the real RAG verdict for accurate tracing -->
-    rag_verdict_is_sufficient: bool
+# Initialize Tavily for web search
+web_search_tool = TavilySearchAPIWrapper()
 
-# --- Node 1: router (decision) ---
-def router_node(state: AgentState, config: RunnableConfig) -> AgentState:
-    print("\n--- Entering router_node ---")
-    query = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
-    web_search_enabled = config.get("configurable", {}).get("web_search_enabled", True)
-    print(f"Router received web search info : {web_search_enabled}")
- 
-    system_prompt = (
-        "You are an intelligent routing agent designed to direct user queries to the most appropriate tool."
-        "Your primary goal is to provide accurate and relevant information by selecting the best source."
-        "Prioritize using the **internal knowledge base (RAG)** for factual information that is likely "
-        "to be contained within pre-uploaded documents or for common, well-established facts."
-    )
+# Define the state structure
+class AgentState(Dict[str, Any]):
+    messages: list
+    route: str = ""
+    rag: str = ""
+    web: str = ""
+    rag_verdict_is_sufficient: bool = False
+    initial_router_decision: str = ""
+    router_override_reason: str = ""
+    web_search_enabled: bool = True
+
+# FIXED: Router node with better error handling
+def router(state: AgentState) -> AgentState:
+    """Route the conversation to either RAG lookup or direct answer."""
+    print("--- Entering router_node ---")
     
-    if web_search_enabled:
-        system_prompt += (
-            "\nYou **CAN** use web search for queries that require very current, real-time, or broad general knowledge "
-            "that is unlikely to be in a specific, static knowledge base (e.g., today's news, live data, very recent events)."
-            "\n\nChoose one of the following routes:"
-            "\n- 'rag': For queries about specific entities, historical facts, product details, procedures, or any information that would typically be found in a curated document collection (e.g., 'What is X?', 'How does Y work?', 'Explain Z policy')."
-            "\n- 'web': For queries about current events, live data, very recent news, or broad general knowledge that requires up-to-date internet access (e.g., 'Who won the election yesterday?', 'What is the weather in London?', 'Latest news on technology')."
-        )
-    else:
-        system_prompt += (
-            "\n**Web search is currently DISABLED.** You **MUST NOT** choose the 'web' route."
-            "If a query would normally require web search, you should attempt to answer it using RAG (if applicable) or directly from your general knowledge."
-            "\n\nChoose one of the following routes:"
-            "\n- 'rag': For queries about specific entities, historical facts, product details, procedures, or any information that would typically be found in a curated document collection, AND for queries that would normally go to web search but web search is disabled."
-        )
-
-    system_prompt += (
-        "\n- 'answer': For very simple, direct questions you can answer without any external lookup (e.g., 'What is your name?')."
-        "\n- 'end': For pure greetings or small-talk where no factual answer is expected (e.g., 'Hi', 'How are you?'). If choosing 'end', you MUST provide a 'reply'."
-    )
-
-    messages = [("system", system_prompt), ("user", query)]
-    result: RouteDecision = router_llm.invoke(messages)
+    messages = state["messages"]
+    last_message = messages[-1].content
     
-    initial_router_decision = result.route
-    router_override_reason = None
-
-    if not web_search_enabled and result.route == "web":
-        result.route = "rag" 
-        router_override_reason = "Web search disabled by user; redirected to RAG."
-        print(f"Router decision overridden: changed from 'web' to 'rag' because web search is disabled.")
+    print(f"Router analyzing query: {last_message}")
     
-    print(f"Router final decision: {result.route}, Reply (if 'end'): {result.reply}")
+    # Simple routing logic - you can make this more sophisticated
+    # For now, always try RAG first if available
+    try:
+        # Check if vectorstore is healthy
+        is_healthy, health_msg = check_vectorstore_health()
+        
+        if is_healthy:
+            decision = "rag"
+            print(f"Router decision: {decision} (vectorstore is healthy)")
+        else:
+            print(f"Vectorstore not healthy: {health_msg}")
+            decision = "web" if state.get("web_search_enabled", True) else "answer"
+            print(f"Router decision: {decision} (bypassing unhealthy vectorstore)")
+            
+    except Exception as e:
+        print(f"Router error: {e}")
+        decision = "web" if state.get("web_search_enabled", True) else "answer"
+        print(f"Router decision: {decision} (error fallback)")
     
-    out = {
-        "messages": state["messages"], 
-        "route": result.route,
-        "web_search_enabled": web_search_enabled
-    }
-    if router_override_reason:
-        out["initial_router_decision"] = initial_router_decision
-        out["router_override_reason"] = router_override_reason
-
-    if result.route == "end":
-        out["messages"] = state["messages"] + [AIMessage(content=result.reply or "Hello!")]
+    state["route"] = decision
+    state["initial_router_decision"] = decision
     
-    print("--- Exiting router_node ---")
-    return out
+    print(f"--- Exiting router_node with route: {decision} ---")
+    return state
 
-# --- Node 2: RAG lookup ---
-def rag_node(state: AgentState, config: RunnableConfig) -> AgentState:
-    print("\n--- Entering rag_node ---")
-    query = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
-    web_search_enabled = config.get("configurable", {}).get("web_search_enabled", True)
+# FIXED: RAG lookup node with comprehensive error handling
+def rag_lookup(state: AgentState) -> AgentState:
+    """Retrieve relevant documents and determine if sufficient for answering."""
+    print("--- Entering rag_node ---")
+    
+    query = state["messages"][-1].content
     print(f"RAG query: {query}")
-    chunks = rag_search_tool.invoke(query)
     
-    if chunks.startswith("RAG_ERROR::"):
-        print(f"RAG Error: {chunks}. Checking web search enabled status.")
-        next_route = "web" if web_search_enabled else "answer"
-        return {**state, "rag": "", "route": next_route}
-
-    if chunks:
-        print(f"Retrieved RAG chunks (first 500 chars): {chunks[:500]}...")
-    else:
-        print("No RAG chunks retrieved.")
-
-    judge_messages = [
-        ("system", (
-            "You are a judge evaluating if the **retrieved information** is **sufficient and relevant** "
-            "to fully and accurately answer the user's question. "
-            "If the information is incomplete, vague, or doesn't directly answer the question, it's NOT sufficient."
-            "If it provides a clear, direct, and comprehensive answer, it IS sufficient."
-            "If no relevant information was retrieved at all, it is definitely NOT sufficient."
-            "\n\nRespond ONLY with a JSON object: {\"sufficient\": true/false}"
-        )),
-        ("user", f"Question: {query}\n\nRetrieved info: {chunks}\n\nIs this sufficient to answer the question?")
-    ]
-    verdict: RagJudge = judge_llm.invoke(judge_messages)
-    print(f"RAG Judge verdict: {verdict.sufficient}")
+    try:
+        # Get retriever
+        retriever = get_retriever()
+        
+        # Retrieve relevant documents
+        rag_docs = retriever.get_relevant_documents(query)
+        
+        if rag_docs:
+            # Combine all retrieved content
+            rag_content = "\n\n".join([doc.page_content for doc in rag_docs])
+            state["rag"] = rag_content
+            
+            print(f"Retrieved {len(rag_docs)} documents from RAG")
+            
+            # Create a prompt to determine if the content is sufficient
+            sufficiency_prompt = f"""
+            Based on the following retrieved content, can you answer the user's question: "{query}"?
+            
+            Retrieved Content:
+            {rag_content[:2000]}...
+            
+            Respond with only "SUFFICIENT" if the content contains enough information to answer the question,
+            or "NOT_SUFFICIENT" if more information is needed.
+            """
+            
+            try:
+                # Ask LLM if content is sufficient
+                sufficiency_response = llm.invoke([HumanMessage(content=sufficiency_prompt)])
+                verdict = sufficiency_response.content.strip().upper()
+                
+                if "SUFFICIENT" in verdict:
+                    state["rag_verdict_is_sufficient"] = True
+                    state["route"] = "answer"
+                    print("RAG content judged as SUFFICIENT. Proceeding to answer.")
+                else:
+                    state["rag_verdict_is_sufficient"] = False
+                    if state.get("web_search_enabled", True):
+                        state["route"] = "web"
+                        print("RAG content judged as NOT SUFFICIENT. Proceeding to web search.")
+                    else:
+                        state["route"] = "answer"
+                        print("RAG content judged as NOT SUFFICIENT. Web search disabled. Proceeding to answer anyway.")
+                        
+            except Exception as e:
+                print(f"Error in sufficiency check: {e}. Defaulting to NOT SUFFICIENT.")
+                state["rag_verdict_is_sufficient"] = False
+                state["route"] = "web" if state.get("web_search_enabled", True) else "answer"
+        else:
+            print("No documents retrieved from RAG")
+            state["rag"] = ""
+            state["rag_verdict_is_sufficient"] = False
+            state["route"] = "web" if state.get("web_search_enabled", True) else "answer"
+            
+    except Exception as e:
+        print(f"RAG Error: RAG_ERROR::{e}. Checking web search enabled status.")
+        
+        # Set empty RAG content and route to web search or answer
+        state["rag"] = ""
+        state["rag_verdict_is_sufficient"] = False
+        
+        if state.get("web_search_enabled", True):
+            state["route"] = "web"
+            print("Routing to web search due to RAG error.")
+        else:
+            state["route"] = "answer"
+            print("Routing to answer due to RAG error and web search disabled.")
     
-    if verdict.sufficient:
-        next_route = "answer"
-    else:
-        next_route = "web" if web_search_enabled else "answer"
-        print(f"RAG not sufficient. Web search enabled: {web_search_enabled}. Next route: {next_route}")
-
     print("--- Exiting rag_node ---")
-    # <-- CHANGED: Pass the real verdict into the state for the tracer to use -->
-    return {
-        **state,
-        "rag": chunks,
-        "route": next_route,
-        "rag_verdict_is_sufficient": verdict.sufficient,
-        "web_search_enabled": web_search_enabled
-    }
+    return state
 
-# --- Node 3: web search ---
-def web_node(state: AgentState, config: RunnableConfig) -> AgentState:
-    print("\n--- Entering web_node ---")
-    query = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
-    web_search_enabled = config.get("configurable", {}).get("web_search_enabled", True)
+# Web search node
+def web_search(state: AgentState) -> AgentState:
+    """Perform web search to gather additional information."""
+    print("--- Entering web_node ---")
     
-    if not web_search_enabled:
-        print("Web search node entered but web search is disabled. Skipping actual search.")
-        return {**state, "web": "Web search was disabled by the user.", "route": "answer"}
-
+    query = state["messages"][-1].content
     print(f"Web search query: {query}")
-    snippets = web_search_tool.invoke(query)
     
-    if snippets.startswith("WEB_ERROR::"):
-        print(f"Web Error: {snippets}. Proceeding to answer with limited info.")
-        return {**state, "web": "", "route": "answer"}
-
-    print(f"Web snippets retrieved: {snippets[:200]}...")
+    try:
+        # Perform web search
+        web_results = web_search_tool.run(query)
+        state["web"] = web_results
+        state["route"] = "answer"
+        
+        print(f"Web snippets retrieved: {web_results[:200]}...")
+        
+    except Exception as e:
+        print(f"Web search error: {e}")
+        state["web"] = f"Web search failed: {e}"
+        state["route"] = "answer"
+    
     print("--- Exiting web_node ---")
-    return {**state, "web": snippets, "route": "answer"}
+    return state
 
-# --- Node 4: final answer ---
+# Answer generation node
 def answer_node(state: AgentState) -> AgentState:
-    print("\n--- Entering answer_node ---")
-    user_q = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
+    """Generate the final answer using available context."""
+    print("--- Entering answer_node ---")
     
-    ctx_parts = []
-    if state.get("rag"):
-        ctx_parts.append("Knowledge Base Information:\n" + state["rag"])
-    if state.get("web"):
-        if state["web"] and not state["web"].startswith("Web search was disabled"):
-            ctx_parts.append("Web Search Results:\n" + state["web"])
+    query = state["messages"][-1].content
+    rag_content = state.get("rag", "")
+    web_content = state.get("web", "")
     
-    context = "\n\n".join(ctx_parts).strip()
+    # Build context from available sources
+    context_parts = []
     
-    # <-- CHANGED: New, stricter prompt to prevent answering from general knowledge -->
-    if not context:
-        prompt = f"""You are a helpful assistant. The user asked a question, but you were unable to find any relevant information in your knowledge base or on the web.
-You MUST inform the user that you do not have enough information to answer their question. Do not try to answer it from your own memory.
-
-Question: {user_q}
-"""
-    else:
+    if rag_content:
+        context_parts.append(f"Document Knowledge Base:\n{rag_content}")
+    
+    if web_content and not web_content.startswith("Web search failed"):
+        context_parts.append(f"Web Search Results:\n{web_content}")
+    
+    if context_parts:
+        context = "\n\n---\n\n".join(context_parts)
+        
         prompt = f"""You are a helpful assistant that answers questions based ONLY on the provided context.
 If the provided context does not contain the information needed to answer the question, you MUST state that you do not have enough information to answer.
 DO NOT use any of your own internal knowledge or information you were trained on.
@@ -252,47 +206,121 @@ Context:
 {context}
 ---
 
-Based strictly on the context above, answer the following question.
+Question: {query}
 
-Question: {user_q}
-"""
+Please provide a clear and helpful answer based only on the context provided above."""
 
-    print(f"Prompt sent to answer_llm: {prompt[:500]}...")
-    ans = answer_llm.invoke([HumanMessage(content=prompt)]).content
-    print(f"Final answer generated: {ans[:200]}...")
-    print("--- Exiting answer_node ---")
-    return {
-        **state,
-        "messages": state["messages"] + [AIMessage(content=ans)]
-    }
+    else:
+        # No context available
+        prompt = f"""You are a helpful assistant. The user asked: "{query}"
 
-# --- Routing helpers ---
-def from_router(st: AgentState) -> Literal["rag", "web", "answer", "end"]:
-    return st["route"]
+Unfortunately, I don't have access to relevant information in my knowledge base, and web search is either disabled or failed. 
+I cannot provide a reliable answer to this question without additional context or sources.
 
-def after_rag(st: AgentState) -> Literal["answer", "web"]:
-    return st["route"]
+Please try:
+1. Uploading relevant documents to my knowledge base
+2. Enabling web search if it's currently disabled
+3. Rephrasing your question to be more specific
 
-def after_web(_) -> Literal["answer"]:
-    return "answer"
+Is there anything else I can help you with?"""
 
-# --- Build graph ---
-def build_agent():
-    """Builds and compiles the LangGraph agent."""
-    g = StateGraph(AgentState)
-    g.add_node("router", router_node)
-    g.add_node("rag_lookup", rag_node)
-    g.add_node("web_search", web_node)
-    g.add_node("answer", answer_node)
-
-    g.set_entry_point("router")
+    print(f"Prompt sent to answer_llm: {prompt[:200]}...")
     
-    g.add_conditional_edges("router", from_router, {"rag": "rag_lookup", "web": "web_search", "answer": "answer", "end": END})
-    g.add_conditional_edges("rag_lookup", after_rag, {"answer": "answer", "web": "web_search"})
-    g.add_edge("web_search", "answer")
-    g.add_edge("answer", END)
+    try:
+        # Generate response
+        response = llm.invoke([HumanMessage(content=prompt)])
+        final_answer = response.content
+        
+        print(f"Final answer generated: {final_answer[:200]}...")
+        
+        # Add the AI response to messages
+        state["messages"].append(AIMessage(content=final_answer))
+        
+    except Exception as e:
+        error_msg = f"Error generating answer: {e}"
+        print(error_msg)
+        state["messages"].append(AIMessage(content=f"I apologize, but I encountered an error while generating a response: {error_msg}"))
+    
+    print("--- Exiting answer_node ---")
+    return state
 
-    agent = g.compile(checkpointer=MemorySaver())
-    return agent
+# Conditional routing function
+def route_question(state: AgentState) -> str:
+    """Determine the next node based on the current route."""
+    route = state.get("route", "")
+    print(f"Routing to: {route}")
+    
+    if route == "rag":
+        return "rag_lookup"
+    elif route == "web":
+        return "web_search"
+    elif route == "answer":
+        return "answer"
+    else:
+        print(f"Unknown route: {route}, defaulting to answer")
+        return "answer"
 
-rag_agent = build_agent()
+# Build the graph
+def create_agent_graph():
+    """Create and return the agent graph."""
+    
+    # Create the graph
+    workflow = StateGraph(AgentState)
+    
+    # Add nodes
+    workflow.add_node("router", router)
+    workflow.add_node("rag_lookup", rag_lookup)
+    workflow.add_node("web_search", web_search)
+    workflow.add_node("answer", answer_node)
+    
+    # Set entry point
+    workflow.set_entry_point("router")
+    
+    # Add conditional routing
+    workflow.add_conditional_edges(
+        "router",
+        route_question,
+        {
+            "rag_lookup": "rag_lookup",
+            "web_search": "web_search", 
+            "answer": "answer"
+        }
+    )
+    
+    workflow.add_conditional_edges(
+        "rag_lookup",
+        route_question,
+        {
+            "web_search": "web_search",
+            "answer": "answer"
+        }
+    )
+    
+    # Direct edges to end
+    workflow.add_edge("web_search", "answer")
+    workflow.add_edge("answer", END)
+    
+    # Compile the graph with memory
+    memory = MemorySaver()
+    return workflow.compile(checkpointer=memory)
+
+# Create the agent
+rag_agent = create_agent_graph()
+
+# Test function
+def test_agent():
+    """Test the agent with a simple query."""
+    try:
+        config = {"configurable": {"thread_id": "test_thread"}}
+        inputs = {"messages": [HumanMessage(content="Hello, can you help me?")]}
+        
+        for step in rag_agent.stream(inputs, config=config):
+            print(f"Step: {step}")
+            
+        return True
+    except Exception as e:
+        print(f"Agent test failed: {e}")
+        return False
+
+if __name__ == "__main__":
+    test_agent()

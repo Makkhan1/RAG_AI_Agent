@@ -98,9 +98,13 @@ def get_retriever():
         )
         print(f"Created new Pinecone index: {INDEX_NAME}")
     
-    # FIX: Get the actual index object, don't use index_name
+    # FIX: Get the actual index object and add text_key
     index = pc.Index(INDEX_NAME)
-    vectorstore = PineconeVectorStore(index=index, embedding=embeddings)
+    vectorstore = PineconeVectorStore(
+        index=index, 
+        embedding=embeddings,
+        text_key="text"  # ADD THIS: Required parameter for legacy Pinecone
+    )
     return vectorstore.as_retriever()
 
 # --- Function to add documents (Updated with FIX) ---
@@ -120,8 +124,12 @@ def add_document_to_vectorstore(text_content: str):
     documents = text_splitter.create_documents([text_content])
     print(f"Splitting document into {len(documents)} chunks for indexing...")
     
-    # FIX: Get the actual index object, don't use index_name
+    # FIX: Get the actual index object and add text_key
     index = pc.Index(INDEX_NAME)
-    vectorstore = PineconeVectorStore(index=index, embedding=embeddings)
+    vectorstore = PineconeVectorStore(
+        index=index, 
+        embedding=embeddings,
+        text_key="text"  # ADD THIS: Required parameter for legacy Pinecone
+    )
     vectorstore.add_documents(documents)
     print(f"Successfully added {len(documents)} chunks to Pinecone index '{INDEX_NAME}'.")

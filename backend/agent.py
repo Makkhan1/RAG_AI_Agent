@@ -5,7 +5,19 @@ from typing import Dict, Any
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.runnables import RunnablePassthrough
 from langchain_groq import ChatGroq
-from langchain_tavily import TavilySearchAPIWrapper
+
+# FIXED: Correct Tavily import
+try:
+    from langchain_community.tools.tavily_search import TavilySearchResults
+    TAVILY_AVAILABLE = True
+except ImportError:
+    try:
+        from langchain_tavily import TavilySearchResults
+        TAVILY_AVAILABLE = True
+    except ImportError:
+        TAVILY_AVAILABLE = False
+        print("Warning: Tavily search not available")
+
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
@@ -14,7 +26,8 @@ from .vectorstore import get_retriever, check_vectorstore_health
 
 # Set API Keys as environment variables
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
-os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
+if TAVILY_AVAILABLE and TAVILY_API_KEY:
+    os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 
 # Initialize LLM
 llm = ChatGroq(
@@ -25,8 +38,12 @@ llm = ChatGroq(
     max_retries=2,
 )
 
-# Initialize Tavily for web search
-web_search_tool = TavilySearchAPIWrapper()
+# FIXED: Initialize Tavily search tool
+if TAVILY_AVAILABLE and TAVILY_API_KEY:
+    web_search_tool = TavilySearchResults(max_results=3)
+else:
+    web_search_tool = None
+    print("Warning: Web search disabled - Tavily not available or API key missing")
 
 # Define the state structure
 class AgentState(Dict[str, Any]):
@@ -39,7 +56,7 @@ class AgentState(Dict[str, Any]):
     router_override_reason: str = ""
     web_search_enabled: bool = True
 
-# FIXED: Router node with better error handling
+# Router node
 def router(state: AgentState) -> AgentState:
     """Route the conversation to either RAG lookup or direct answer."""
     print("--- Entering router_node ---")
@@ -49,8 +66,6 @@ def router(state: AgentState) -> AgentState:
     
     print(f"Router analyzing query: {last_message}")
     
-    # Simple routing logic - you can make this more sophisticated
-    # For now, always try RAG first if available
     try:
         # Check if vectorstore is healthy
         is_healthy, health_msg = check_vectorstore_health()
@@ -60,12 +75,12 @@ def router(state: AgentState) -> AgentState:
             print(f"Router decision: {decision} (vectorstore is healthy)")
         else:
             print(f"Vectorstore not healthy: {health_msg}")
-            decision = "web" if state.get("web_search_enabled", True) else "answer"
+            decision = "web" if state.get("web_search_enabled", True) and web_search_tool else "answer"
             print(f"Router decision: {decision} (bypassing unhealthy vectorstore)")
             
     except Exception as e:
         print(f"Router error: {e}")
-        decision = "web" if state.get("web_search_enabled", True) else "answer"
+        decision = "web" if state.get("web_search_enabled", True) and web_search_tool else "answer"
         print(f"Router decision: {decision} (error fallback)")
     
     state["route"] = decision
@@ -74,7 +89,7 @@ def router(state: AgentState) -> AgentState:
     print(f"--- Exiting router_node with route: {decision} ---")
     return state
 
-# FIXED: RAG lookup node with comprehensive error handling
+# RAG lookup node
 def rag_lookup(state: AgentState) -> AgentState:
     """Retrieve relevant documents and determine if sufficient for answering."""
     print("--- Entering rag_node ---")
@@ -118,7 +133,7 @@ def rag_lookup(state: AgentState) -> AgentState:
                     print("RAG content judged as SUFFICIENT. Proceeding to answer.")
                 else:
                     state["rag_verdict_is_sufficient"] = False
-                    if state.get("web_search_enabled", True):
+                    if state.get("web_search_enabled", True) and web_search_tool:
                         state["route"] = "web"
                         print("RAG content judged as NOT SUFFICIENT. Proceeding to web search.")
                     else:
@@ -128,12 +143,12 @@ def rag_lookup(state: AgentState) -> AgentState:
             except Exception as e:
                 print(f"Error in sufficiency check: {e}. Defaulting to NOT SUFFICIENT.")
                 state["rag_verdict_is_sufficient"] = False
-                state["route"] = "web" if state.get("web_search_enabled", True) else "answer"
+                state["route"] = "web" if state.get("web_search_enabled", True) and web_search_tool else "answer"
         else:
             print("No documents retrieved from RAG")
             state["rag"] = ""
             state["rag_verdict_is_sufficient"] = False
-            state["route"] = "web" if state.get("web_search_enabled", True) else "answer"
+            state["route"] = "web" if state.get("web_search_enabled", True) and web_search_tool else "answer"
             
     except Exception as e:
         print(f"RAG Error: RAG_ERROR::{e}. Checking web search enabled status.")
@@ -142,7 +157,7 @@ def rag_lookup(state: AgentState) -> AgentState:
         state["rag"] = ""
         state["rag_verdict_is_sufficient"] = False
         
-        if state.get("web_search_enabled", True):
+        if state.get("web_search_enabled", True) and web_search_tool:
             state["route"] = "web"
             print("Routing to web search due to RAG error.")
         else:
@@ -152,7 +167,7 @@ def rag_lookup(state: AgentState) -> AgentState:
     print("--- Exiting rag_node ---")
     return state
 
-# Web search node
+# FIXED: Web search node with proper error handling
 def web_search(state: AgentState) -> AgentState:
     """Perform web search to gather additional information."""
     print("--- Entering web_node ---")
@@ -160,13 +175,37 @@ def web_search(state: AgentState) -> AgentState:
     query = state["messages"][-1].content
     print(f"Web search query: {query}")
     
+    if not web_search_tool:
+        print("Web search tool not available")
+        state["web"] = "Web search is not available"
+        state["route"] = "answer"
+        print("--- Exiting web_node (no tool available) ---")
+        return state
+    
     try:
-        # Perform web search
-        web_results = web_search_tool.run(query)
-        state["web"] = web_results
+        # FIXED: Use the correct method call for TavilySearchResults
+        web_results = web_search_tool.invoke({"query": query})
+        
+        # Format the results
+        if isinstance(web_results, list) and web_results:
+            formatted_results = []
+            for result in web_results:
+                if isinstance(result, dict):
+                    title = result.get("title", "No title")
+                    content = result.get("content", "No content")
+                    url = result.get("url", "No URL")
+                    formatted_results.append(f"Title: {title}\nContent: {content}\nURL: {url}")
+                else:
+                    formatted_results.append(str(result))
+            
+            web_content = "\n\n".join(formatted_results)
+        else:
+            web_content = str(web_results)
+        
+        state["web"] = web_content
         state["route"] = "answer"
         
-        print(f"Web snippets retrieved: {web_results[:200]}...")
+        print(f"Web snippets retrieved: {web_content[:200]}...")
         
     except Exception as e:
         print(f"Web search error: {e}")
@@ -191,7 +230,7 @@ def answer_node(state: AgentState) -> AgentState:
     if rag_content:
         context_parts.append(f"Document Knowledge Base:\n{rag_content}")
     
-    if web_content and not web_content.startswith("Web search failed"):
+    if web_content and not web_content.startswith("Web search failed") and web_content != "Web search is not available":
         context_parts.append(f"Web Search Results:\n{web_content}")
     
     if context_parts:

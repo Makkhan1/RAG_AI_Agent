@@ -1,3 +1,5 @@
+# rag_agent_app/backend/main.py
+
 import os
 import time
 import asyncio
@@ -12,11 +14,11 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_community.document_loaders import PyPDFLoader
 
 from .agent import rag_agent
-from .vectorstore import add_document_to_vectorstore
+from .vectorstore import add_document_to_vectorstore, check_vectorstore_health
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="RAG AI Agent",
+    title="LangGraph RAG Agent API",
     description="API for the LangGraph-powered RAG agent with Pinecone and Groq.",
     version="1.0.0",
 )
@@ -69,6 +71,20 @@ async def root():
 async def health_check():
     return {"status": "ok", "service": "rag-agent"}
 
+@app.get("/vectorstore-health")
+async def vectorstore_health_endpoint():
+    """Check vectorstore health"""
+    try:
+        is_healthy, message = await asyncio.get_event_loop().run_in_executor(
+            None, check_vectorstore_health
+        )
+        if is_healthy:
+            return {"status": "healthy", "message": message}
+        else:
+            return {"status": "unhealthy", "message": message}
+    except Exception as e:
+        return {"status": "error", "message": f"Health check failed: {e}"}
+
 # --- Document Upload Endpoint with timeout handling ---
 @app.post("/upload-document/", response_model=DocumentUploadResponse, status_code=status.HTTP_200_OK)
 async def upload_document(file: UploadFile = File(...)):
@@ -100,7 +116,10 @@ async def upload_document(file: UploadFile = File(...)):
         # Clean up temp file if it exists
         if temp_file_path and os.path.exists(temp_file_path):
             os.remove(temp_file_path)
-        raise
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Upload failed: {str(e)}"
+        )
 
 async def _process_document_upload(file: UploadFile) -> DocumentUploadResponse:
     """Helper function to process document upload"""
@@ -125,10 +144,10 @@ async def _process_document_upload(file: UploadFile) -> DocumentUploadResponse:
             full_text_content = "\n\n".join([doc.page_content for doc in documents])
             
             # Run vectorstore operation in thread pool to avoid blocking
-            await asyncio.get_event_loop().run_in_executor(
+            chunks_added = await asyncio.get_event_loop().run_in_executor(
                 None, add_document_to_vectorstore, full_text_content
             )
-            total_chunks_added = len(documents)
+            total_chunks_added = chunks_added
         
         print(f"Successfully processed {file.filename} with {total_chunks_added} chunks")
         
@@ -175,7 +194,10 @@ async def _process_chat_request(request: QueryRequest) -> AgentResponse:
                 "web_search_enabled": request.enable_web_search
             }
         }
-        inputs = {"messages": [HumanMessage(content=request.query)]}
+        inputs = {
+            "messages": [HumanMessage(content=request.query)],
+            "web_search_enabled": request.enable_web_search
+        }
 
         final_message = ""
         

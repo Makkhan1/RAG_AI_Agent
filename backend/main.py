@@ -1,9 +1,11 @@
 import os
 import time
+import asyncio
 from typing import List, Dict, Any
 import tempfile
 
 from fastapi import FastAPI, HTTPException, status, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from langchain_core.messages import HumanMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -14,9 +16,18 @@ from .vectorstore import add_document_to_vectorstore
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="LangGraph RAG Agent API",
+    title="RAG AI Agent",
     description="API for the LangGraph-powered RAG agent with Pinecone and Groq.",
     version="1.0.0",
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # In-memory session manager for LangGraph checkpoints (for demonstration)
@@ -44,7 +55,21 @@ class DocumentUploadResponse(BaseModel):
     filename: str
     processed_chunks: int
 
-# --- Document Upload Endpoint ---
+# --- Root endpoint for health checks ---
+@app.get("/")
+async def root():
+    return {
+        "message": "LangGraph RAG Agent API is running", 
+        "status": "healthy",
+        "version": "1.0.0"
+    }
+
+@app.get("/health")
+@app.head("/health")
+async def health_check():
+    return {"status": "ok", "service": "rag-agent"}
+
+# --- Document Upload Endpoint with timeout handling ---
 @app.post("/upload-document/", response_model=DocumentUploadResponse, status_code=status.HTTP_200_OK)
 async def upload_document(file: UploadFile = File(...)):
     """
@@ -56,6 +81,31 @@ async def upload_document(file: UploadFile = File(...)):
             detail="Only PDF files are supported."
         )
 
+    temp_file_path = None
+    try:
+        # Use asyncio timeout to prevent hanging
+        return await asyncio.wait_for(
+            _process_document_upload(file),
+            timeout=300.0  # 5 minutes timeout
+        )
+    except asyncio.TimeoutError:
+        # Clean up temp file if it exists
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        raise HTTPException(
+            status_code=status.HTTP_408_REQUEST_TIMEOUT,
+            detail="Document upload timed out. Please try again with a smaller file."
+        )
+    except Exception as e:
+        # Clean up temp file if it exists
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+        raise
+
+async def _process_document_upload(file: UploadFile) -> DocumentUploadResponse:
+    """Helper function to process document upload"""
+    
+    # Create temporary file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
         file_content = await file.read()
         tmp_file.write(file_content)
@@ -64,14 +114,23 @@ async def upload_document(file: UploadFile = File(...)):
     print(f"Received PDF for upload: {file.filename}. Saved temporarily to {temp_file_path}")
 
     try:
+        # Load PDF with timeout
         loader = PyPDFLoader(temp_file_path)
-        documents = loader.load()
+        documents = await asyncio.get_event_loop().run_in_executor(
+            None, loader.load
+        )
 
         total_chunks_added = 0
         if documents:
             full_text_content = "\n\n".join([doc.page_content for doc in documents])
-            add_document_to_vectorstore(full_text_content)
+            
+            # Run vectorstore operation in thread pool to avoid blocking
+            await asyncio.get_event_loop().run_in_executor(
+                None, add_document_to_vectorstore, full_text_content
+            )
             total_chunks_added = len(documents)
+        
+        print(f"Successfully processed {file.filename} with {total_chunks_added} chunks")
         
         return DocumentUploadResponse(
             message=f"PDF '{file.filename}' successfully uploaded and indexed.",
@@ -82,16 +141,31 @@ async def upload_document(file: UploadFile = File(...)):
         print(f"Error processing PDF document: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to process PDF: {e}"
+            detail=f"Failed to process PDF: {str(e)}"
         )
     finally:
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
             print(f"Cleaned up temporary file: {temp_file_path}")
 
-# --- Chat Endpoint ---
+# --- Chat Endpoint with timeout handling ---
 @app.post("/chat/", response_model=AgentResponse)
 async def chat_with_agent(request: QueryRequest):
+    """Chat endpoint with timeout handling"""
+    try:
+        # Add timeout to prevent hanging
+        return await asyncio.wait_for(
+            _process_chat_request(request),
+            timeout=120.0  # 2 minutes timeout
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_408_REQUEST_TIMEOUT,
+            detail="Chat request timed out. Please try again."
+        )
+
+async def _process_chat_request(request: QueryRequest) -> AgentResponse:
+    """Helper function to process chat request"""
     trace_events_for_frontend: List[TraceEvent] = []
     
     try:
@@ -108,9 +182,14 @@ async def chat_with_agent(request: QueryRequest):
         print(f"--- Starting Agent Stream for session {request.session_id} ---")
         print(f"Web Search Enabled: {request.enable_web_search}")
 
-        s = {} # <-- CHANGED: Initialized to prevent UnboundLocalError on empty streams
+        s = {}  # Initialized to prevent UnboundLocalError on empty streams
 
-        for i, s in enumerate(rag_agent.stream(inputs, config=config)):
+        # Run agent stream in thread pool to avoid blocking
+        stream_generator = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: list(rag_agent.stream(inputs, config=config))
+        )
+
+        for i, s in enumerate(stream_generator):
             current_node_name = None
             node_output_state = None
 
@@ -138,7 +217,6 @@ async def chat_with_agent(request: QueryRequest):
                     event_details = {"decision": route_decision, "reason": "Based on initial query analysis."}
                 event_type = "router_decision"
             
-            # <-- CHANGED: Logic updated for accurate RAG verdict tracing -->
             elif current_node_name == "rag_lookup":
                 rag_content_summary = node_output_state.get("rag", "")[:200] + "..."
                 rag_sufficient = node_output_state.get("rag_verdict_is_sufficient", False)
@@ -150,7 +228,7 @@ async def chat_with_agent(request: QueryRequest):
                     next_route = node_output_state.get("route")
                     if next_route == "web":
                         event_description = "RAG Lookup: Content judged NOT SUFFICIENT. Diverting to web search."
-                    else: # next_route is 'answer' because web is disabled
+                    else:
                         event_description = "RAG Lookup: Content judged NOT SUFFICIENT. Proceeding to answer as fallback."
                     event_details = {"retrieved_content_summary": rag_content_summary, "sufficiency_verdict": "Not Sufficient"}
                 
@@ -191,15 +269,14 @@ async def chat_with_agent(request: QueryRequest):
                     break
         
         if not final_message:
-             print("Agent finished, but no final AIMessage found in the final state after stream completion.")
-             # Try to get the last message even if the stream was short
-             if s and "messages" in s.get(list(s.keys())[0], {}):
-                 last_state = s[list(s.keys())[0]]
-                 for msg in reversed(last_state["messages"]):
-                     if isinstance(msg, AIMessage):
-                         final_message = msg.content
-                         break
-             if not final_message:
+            print("Agent finished, but no final AIMessage found in the final state after stream completion.")
+            if s and "messages" in s.get(list(s.keys())[0], {}):
+                last_state = s[list(s.keys())[0]]
+                for msg in reversed(last_state["messages"]):
+                    if isinstance(msg, AIMessage):
+                        final_message = msg.content
+                        break
+            if not final_message:
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Agent did not return a valid response (final AI message not found).")
 
         print(f"--- Agent Stream Ended. Final Response: {final_message[:200]}... ---")
@@ -212,8 +289,10 @@ async def chat_with_agent(request: QueryRequest):
         error_details = f"Error during agent invocation: {e}"
         print(error_details)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal Server Error: {e}")
-    
-@app.get("/health")
-@app.head("/health")
-async def health_check():
-    return {"status": "ok"}
+
+# Important: Add this for proper port binding in production
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    print(f"Starting server on port {port}")
+    uvicorn.run(app, host="0.0.0.0", port=port)

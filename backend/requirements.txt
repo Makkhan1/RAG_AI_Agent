@@ -17,5 +17,5 @@ uvicorn[standard]
 streamlit
 python-dotenv
 python-multipart
-pinecone-client
+pinecone-client>=3.0.0,<4.0.0
 requests

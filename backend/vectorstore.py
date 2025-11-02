@@ -6,7 +6,7 @@ import json
 from typing import List
 
 from pinecone import Pinecone, ServerlessSpec
-from langchain_pinecone import PineconeVectorStore
+from langchain_community.vectorstores import Pinecone as PineconeVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 # --- CHANGE 1: Import the base Embeddings class to create our custom one ---
 from langchain_core.embeddings import Embeddings

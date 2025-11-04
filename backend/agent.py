@@ -129,6 +129,22 @@ def router_node(state: AgentState, config: RunnableConfig) -> AgentState:
         "\n- User: 'Hello there!' -> Route: 'end', reply='Hello! How can I assist you today?'"
     )
 
+    system_prompt += (
+    "\n\nFor mathematical problems and calculations:"
+    "\n- 'answer': For basic arithmetic, simple algebra, standard mathematical concepts, or problems you can solve directly (e.g., 'What is 25 + 37?', 'Solve for x: 2x + 5 = 15', 'What is the derivative of x²?')."
+    "\n- 'rag': For complex mathematical problems, mathematical theorems, proofs, or detailed mathematical procedures that might benefit from knowledge base content (e.g., 'Explain the proof of Pythagorean theorem', 'How to solve quadratic equations?', 'What are the applications of calculus in physics?')."
+    "\n- Avoid 'web' for mathematical problems unless they involve very recent mathematical discoveries, current mathematical competitions, or time-sensitive mathematical events."
+    "\n\nMathematical routing examples:"
+    "\n- User: 'What is 123 × 456?' -> Route: 'answer' (Basic arithmetic)."
+    "\n- User: 'Solve: 3x² - 12x + 9 = 0' -> Route: 'answer' (Standard algebra)."
+    "\n- User: 'Explain integration by parts' -> Route: 'rag' (Mathematical concept that benefits from detailed explanation)."
+    "\n- User: 'What is the binomial theorem?' -> Route: 'rag' (Mathematical theorem)."
+    "\n- User: 'Calculate the standard deviation of [2, 4, 6, 8, 10]' -> Route: 'answer' (Standard calculation)."
+    "\n- User: 'How do you prove that √2 is irrational?' -> Route: 'rag' (Mathematical proof)."
+    "\n- User: 'What is 15% of 240?' -> Route: 'answer' (Simple percentage calculation)."
+    "\n- User: 'Explain the fundamental theorem of calculus' -> Route: 'rag' (Complex mathematical concept)."
+)
+
     messages = [("system", system_prompt), ("user", query)]
     result: RouteDecision = router_llm.invoke(messages)
     

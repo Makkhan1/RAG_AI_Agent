@@ -21,3 +21,18 @@ def init_session_state():
     # Initialize the web search enabled flag, defaulting to True
     if "web_search_enabled" not in st.session_state:
         st.session_state.web_search_enabled = True
+
+    # --- FIX: Initialize new variables required by the updated app.py ---
+
+    # Flag to control the chat input's disabled state while the agent is thinking.
+    if "processing" not in st.session_state:
+        st.session_state.processing = False
+
+    # Stores the trace from the last backend call. Initialize as an empty list.
+    # This is the direct fix for the AttributeError you encountered.
+    if "trace_events" not in st.session_state:
+        st.session_state.trace_events = []
+        
+    # Used to handle clicks from the example question buttons.
+    if "prompt_from_button" not in st.session_state:
+        st.session_state.prompt_from_button = None

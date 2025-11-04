@@ -6,7 +6,7 @@ import json
 from typing import List
 
 from pinecone import Pinecone, ServerlessSpec
-from langchain_community.vectorstores import Pinecone as PineconeVectorStore
+from langchain_pinecone import PineconeVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 # --- CHANGE 1: Import the base Embeddings class to create our custom one ---
 from langchain_core.embeddings import Embeddings
@@ -84,7 +84,7 @@ class JinaApiEmbeddings(Embeddings):
 embeddings = JinaApiEmbeddings(api_key=JINA_API_KEY)
 
 
-# --- Retriever (Updated function with FIX) ---
+# --- Retriever (Updated function) ---
 def get_retriever():
     """Initializes and returns the Pinecone vector store retriever."""
     if INDEX_NAME not in pc.list_indexes().names():
@@ -98,16 +98,10 @@ def get_retriever():
         )
         print(f"Created new Pinecone index: {INDEX_NAME}")
     
-    # FIX: Get the actual index object and add text_key
-    index = pc.Index(INDEX_NAME)
-    vectorstore = PineconeVectorStore(
-        index=index, 
-        embedding=embeddings,
-        text_key="text"  # ADD THIS: Required parameter for legacy Pinecone
-    )
+    vectorstore = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
     return vectorstore.as_retriever()
 
-# --- Function to add documents (Updated with FIX) ---
+# --- Function to add documents (No changes needed in the logic) ---
 def add_document_to_vectorstore(text_content: str):
     """Adds a single text document to the Pinecone vector store."""
     if not text_content:
@@ -124,12 +118,6 @@ def add_document_to_vectorstore(text_content: str):
     documents = text_splitter.create_documents([text_content])
     print(f"Splitting document into {len(documents)} chunks for indexing...")
     
-    # FIX: Get the actual index object and add text_key
-    index = pc.Index(INDEX_NAME)
-    vectorstore = PineconeVectorStore(
-        index=index, 
-        embedding=embeddings,
-        text_key="text"  # ADD THIS: Required parameter for legacy Pinecone
-    )
+    vectorstore = PineconeVectorStore(index_name=INDEX_NAME, embedding=embeddings)
     vectorstore.add_documents(documents)
     print(f"Successfully added {len(documents)} chunks to Pinecone index '{INDEX_NAME}'.")

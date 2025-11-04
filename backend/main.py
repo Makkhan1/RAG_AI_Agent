@@ -218,6 +218,20 @@ async def chat_with_agent(request: QueryRequest):
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+@app.get("/")
+async def root():
+    return {
+        "message": "LangGraph RAG Agent API is running!",
+        "version": "1.0.0",
+        "status": "healthy",
+        "endpoints": {
+            "health": "/health",
+            "chat": "/chat/",
+            "upload": "/upload-document/",
+            "docs": "/docs"
+        }
+    }
     
 if __name__ == "__main__":
     import uvicorn

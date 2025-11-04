@@ -1,4 +1,4 @@
-# rag_agent_app/backend/agent.py
+# # rag_agent_app/backend/agent.py
 
 import os
 from typing import List, Literal, TypedDict
@@ -11,10 +11,9 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.runnables import RunnableConfig
 
-# Import the lazy-loading retriever function
-from .vectorstore import get_retriever
 # Import API keys from config
 from .config import GROQ_API_KEY, TAVILY_API_KEY
+from .vectorstore import get_retriever
 
 # --- Tools ---
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
@@ -42,9 +41,7 @@ def web_search_tool(query: str) -> str:
 def rag_search_tool(query: str) -> str:
     """Top-K chunks from KB (empty string if none)"""
     try:
-        # This now uses the lazy-loading retriever
         retriever_instance = get_retriever()
-        # <-- CHANGED: Increased k to retrieve more documents and improve recall -->
         docs = retriever_instance.invoke(query, k=10)
         return "\n\n".join(d.page_content for d in docs) if docs else ""
     except Exception as e:
@@ -61,6 +58,7 @@ class RagJudge(BaseModel):
 # --- LLM instances with structured output where needed ---
 os.environ["GROQ_API_KEY"] = GROQ_API_KEY
 
+
 router_llm = ChatOpenAI(
     model_name="meta-llama/llama-3.3-8b-instruct:free",
     openai_api_key=os.getenv("GROQ_API_KEY"),
@@ -68,7 +66,7 @@ router_llm = ChatOpenAI(
 ).with_structured_output(RouteDecision)
 
 judge_llm = ChatOpenAI(
-    model_name="cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    model_name="meta-llama/llama-3.3-8b-instruct:free",
     openai_api_key=os.getenv("GROQ_API_KEY"),
     base_url="https://openrouter.ai/api/v1"
 ).with_structured_output(RagJudge)
@@ -86,8 +84,7 @@ class AgentState(TypedDict, total=False):
     rag: str
     web: str
     web_search_enabled: bool
-    # <-- CHANGED: Added field to pass the real RAG verdict for accurate tracing -->
-    rag_verdict_is_sufficient: bool
+    rag_verdict_is_sufficient: bool # <-- CHANGED: Added for accurate tracing
 
 # --- Node 1: router (decision) ---
 def router_node(state: AgentState, config: RunnableConfig) -> AgentState:
@@ -105,7 +102,7 @@ def router_node(state: AgentState, config: RunnableConfig) -> AgentState:
     
     if web_search_enabled:
         system_prompt += (
-            "\nYou **CAN** use web search for queries that require very current, real-time, or broad general knowledge "
+            "You **CAN** use web search for queries that require very current, real-time, or broad general knowledge "
             "that is unlikely to be in a specific, static knowledge base (e.g., today's news, live data, very recent events)."
             "\n\nChoose one of the following routes:"
             "\n- 'rag': For queries about specific entities, historical facts, product details, procedures, or any information that would typically be found in a curated document collection (e.g., 'What is X?', 'How does Y work?', 'Explain Z policy')."
@@ -113,15 +110,23 @@ def router_node(state: AgentState, config: RunnableConfig) -> AgentState:
         )
     else:
         system_prompt += (
-            "\n**Web search is currently DISABLED.** You **MUST NOT** choose the 'web' route."
+            "**Web search is currently DISABLED.** You **MUST NOT** choose the 'web' route."
             "If a query would normally require web search, you should attempt to answer it using RAG (if applicable) or directly from your general knowledge."
             "\n\nChoose one of the following routes:"
             "\n- 'rag': For queries about specific entities, historical facts, product details, procedures, or any information that would typically be found in a curated document collection, AND for queries that would normally go to web search but web search is disabled."
+            "\n- 'answer': For very simple, direct questions you can answer without any external lookup (e.g., 'What is your name?')."
         )
 
     system_prompt += (
         "\n- 'answer': For very simple, direct questions you can answer without any external lookup (e.g., 'What is your name?')."
         "\n- 'end': For pure greetings or small-talk where no factual answer is expected (e.g., 'Hi', 'How are you?'). If choosing 'end', you MUST provide a 'reply'."
+        "\n\nExample routing decisions:"
+        "\n- User: 'What are the treatment of diabetes?' -> Route: 'rag' (Factual knowledge, likely in KB)."
+        "\n- User: 'What is the capital of France?' -> Route: 'rag' (Common knowledge, can be in KB or answered directly if LLM knows)."
+        "\n- User: 'Who won the NBA finals last night?' -> Route: 'web' (Current event, requires live data)."
+        "\n- User: 'How do I submit an expense report?' -> Route: 'rag' (Internal procedure)."
+        "\n- User: 'Tell me about quantum computing.' -> Route: 'rag' (Foundational knowledge can be in KB. If KB is sparse, judge will route to web if enabled)."
+        "\n- User: 'Hello there!' -> Route: 'end', reply='Hello! How can I assist you today?'"
     )
 
     messages = [("system", system_prompt), ("user", query)]
@@ -191,12 +196,11 @@ def rag_node(state: AgentState, config: RunnableConfig) -> AgentState:
         print(f"RAG not sufficient. Web search enabled: {web_search_enabled}. Next route: {next_route}")
 
     print("--- Exiting rag_node ---")
-    # <-- CHANGED: Pass the real verdict into the state for the tracer to use -->
     return {
         **state,
         "rag": chunks,
         "route": next_route,
-        "rag_verdict_is_sufficient": verdict.sufficient,
+        "rag_verdict_is_sufficient": verdict.sufficient, # <-- CHANGED: Pass the real verdict
         "web_search_enabled": web_search_enabled
     }
 

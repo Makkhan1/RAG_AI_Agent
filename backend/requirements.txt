@@ -4,7 +4,7 @@ langchain-core
 langchain-community
 langchain-text-splitters
 langchain-openai
-langchain-pinecone==0.0.3
+langchain-pinecone>=0.1.0  # Changed from 0.0.3
 langchain-groq
 langchain-tavily
 langchain-huggingface

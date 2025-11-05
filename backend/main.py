@@ -220,6 +220,7 @@ async def health_check():
     return {"status": "ok"}
 
 @app.get("/")
+@app.head("/")
 async def root():
     return {
         "message": "LangGraph RAG Agent API is running!",

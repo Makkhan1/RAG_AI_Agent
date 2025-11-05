@@ -10,7 +10,7 @@ def load_frontend_config():
     """
     load_dotenv()
     return {
-        "FASTAPI_BASE_URL": os.getenv("FASTAPI_BASE_URL", "https://rag-ai-agent.onrender.com")
+        "FASTAPI_BASE_URL": os.getenv("FASTAPI_BASE_URL", "https://rag-ai-agent-79hn.onrender.com/")
     }
 
 # Load config once when the module is imported

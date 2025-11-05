@@ -11,9 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the backend code into the container
 COPY . .
 
-# Expose the port the app runs on
+# Expose the port the app runs on (this is just documentation, the actual port is set by $PORT)
 EXPOSE 8000
 
 # Command to run the application
-# Use --host 0.0.0.0 to make it accessible from outside the container
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Use $PORT environment variable that Render provides
+CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

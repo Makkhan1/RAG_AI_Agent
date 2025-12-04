@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG AI AGENT</title>
+
+    <!-- CUSTOM FAVICON (Neural Node Theme) -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%23050505'/%3E%3Ccircle cx='50' cy='50' r='35' stroke='%2300f3ff' stroke-width='5' fill='none'/%3E%3Ccircle cx='50' cy='50' r='15' fill='%23bc13fe'/%3E%3Cpath d='M50 15 L50 35 M50 65 L50 85 M15 50 L35 50 M65 50 L85 50' stroke='%2300f3ff' stroke-width='5'/%3E%3C/svg%3E">
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    
+    <!-- Google Fonts: JetBrains Mono -->
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&display=swap" rel="stylesheet">
+
+    <!-- Config & Styles -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        mono: ['"JetBrains Mono"', 'monospace'],
+                    },
+                    colors: {
+                        cyber: {
+                            black: '#050505',
+                            dark: '#0a0a0a',
+                            panel: '#111111',
+                            border: '#333333',
+                            blue: '#00f3ff',
+                            purple: '#bc13fe',
+                            green: '#00ff9d',
+                            text: '#e0e0e0',
+                            dim: '#888888'
+                        }
+                    },
+                    animation: {
+                        'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+                        'scanline': 'scanline 8s linear infinite',
+                    },
+                    keyframes: {
+                        scanline: {
+                            '0%': { transform: 'translateY(-100%)' },
+                            '100%': { transform: 'translateY(100%)' }
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body {
+            background-color: #050505;
+            color: #e0e0e0;
+            font-family: 'JetBrains Mono', monospace;
+            overflow-x: hidden;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0a0a0a; }
+        ::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+        ::-webkit-scrollbar-thumb:hover { background: #00f3ff; }
+
+        /* Neon Glow Effects */
+        .neon-border {
+            box-shadow: 0 0 5px rgba(0, 243, 255, 0.2);
+            transition: all 0.3s ease;
+        }
+        .neon-border:focus-within, .neon-border:hover {
+            border-color: #00f3ff;
+            box-shadow: 0 0 15px rgba(0, 243, 255, 0.3);
+        }
+
+        .neon-text-blue { text-shadow: 0 0 10px rgba(0, 243, 255, 0.5); }
+        .neon-text-purple { text-shadow: 0 0 10px rgba(188, 19, 254, 0.5); }
+
+        /* Loader */
+        .loader {
+            border: 2px solid #333;
+            border-top: 2px solid #00f3ff;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* Markdown Styles */
+        .prose strong { color: #00f3ff; }
+        .prose code { color: #bc13fe; background: rgba(188, 19, 254, 0.1); padding: 2px 4px; border-radius: 4px; }
+        .prose p { margin-bottom: 0.5rem; }
+        .prose ul { list-style-type: disc; padding-left: 1.5rem; margin-bottom: 0.5rem; }
+        .prose ol { list-style-type: decimal; padding-left: 1.5rem; margin-bottom: 0.5rem; }
+
+        /* File Input Hide */
+        input[type="file"]::file-selector-button { display: none; }
+    </style>
+</head>
+<!-- Changed body to h-screen and fixed layout to support full width footer -->
+<body class="h-screen w-full flex flex-col relative overflow-hidden text-cyber-text bg-cyber-black font-mono">
+
+    <!-- Background Grid -->
+    <div class="fixed inset-0 z-0 pointer-events-none opacity-10" 
+         style="background-image: linear-gradient(#333 1px, transparent 1px), linear-gradient(90deg, #333 1px, transparent 1px); background-size: 40px 40px;">
+    </div>
+
+    <!-- MAIN WRAPPER (Flex Row for Columns) -->
+    <div class="flex-1 flex flex-col md:flex-row min-h-0 w-full relative z-10">
+        
+        <!-- SIDEBAR (Settings & Upload) -->
+        <aside class="w-full md:w-80 border-r border-cyber-border bg-cyber-dark/90 backdrop-blur z-20 flex flex-col h-full">
+            <div class="p-6 border-b border-cyber-border shrink-0">
+                <h1 class="text-xl font-bold tracking-tighter text-cyber-blue neon-text-blue flex items-center gap-2">
+                    <i data-lucide="bot" class="w-6 h-6"></i> RAG AI AGENT
+                </h1>
+                <p class="text-xs text-cyber-dim mt-1">Intelligent Document Query System</p>
+            </div>
+
+            <div class="p-4 flex-1 overflow-y-auto space-y-8">
+                
+                <!-- Upload Section -->
+                <div>
+                    <h2 class="text-sm font-bold text-cyber-green mb-3 flex items-center gap-2">
+                        <i data-lucide="database" class="w-4 h-4"></i> KNOWLEDGE BASE
+                    </h2>
+                    <div class="bg-cyber-panel border border-cyber-border p-4 rounded neon-border relative group">
+                        <label class="block text-xs text-cyber-dim mb-2 uppercase tracking-wide">Upload PDF Document</label>
+                        
+                        <div class="relative dashed-border border-2 border-dashed border-cyber-border rounded hover:border-cyber-green transition-colors p-4 text-center cursor-pointer" id="drop-zone">
+                            <input type="file" id="pdf-upload" accept=".pdf" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" onchange="handleFileSelect(this)">
+                            <div id="file-label" class="pointer-events-none">
+                                <i data-lucide="upload-cloud" class="w-6 h-6 mx-auto text-cyber-dim mb-2"></i>
+                                <span class="text-xs text-cyber-dim">Click or Drag PDF here</span>
+                            </div>
+                        </div>
+
+                        <button onclick="uploadDocument()" id="upload-btn" class="mt-3 w-full bg-cyber-border hover:bg-cyber-green hover:text-cyber-black text-cyber-text text-xs py-2 px-3 rounded transition-all font-bold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                            <i data-lucide="zap" class="w-3 h-3"></i> INGEST DATA
+                        </button>
+                        <div id="upload-status" class="mt-2 text-xs text-center hidden"></div>
+                    </div>
+                </div>
+
+                <!-- Settings Section -->
+                <div>
+                    <h2 class="text-sm font-bold text-cyber-purple mb-3 flex items-center gap-2">
+                        <i data-lucide="settings" class="w-4 h-4"></i> SYSTEM CONFIG
+                    </h2>
+                    <div class="bg-cyber-panel border border-cyber-border p-4 rounded neon-border">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <span class="text-sm font-bold text-cyber-text">Web Search</span>
+                                <p class="text-[10px] text-cyber-dim">Allow external Google access</p>
+                            </div>
+                            <button id="web-search-toggle" onclick="toggleWebSearch()" class="w-10 h-5 bg-cyber-blue rounded-full relative transition-colors">
+                                <div class="absolute right-1 top-1 w-3 h-3 bg-cyber-black rounded-full transition-transform"></div>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Stats/Decor -->
+                <div class="mt-auto pt-4 border-t border-cyber-border">
+                    <div class="grid grid-cols-2 gap-2 text-[10px] text-cyber-dim font-mono">
+                        <div class="bg-cyber-panel p-2 rounded border border-cyber-border">
+                            <span class="block text-cyber-blue">STATUS</span>
+                            <span class="text-green-500">ONLINE</span>
+                        </div>
+                        <div class="bg-cyber-panel p-2 rounded border border-cyber-border">
+                            <span class="block text-cyber-blue">LATENCY</span>
+                            <span id="latency-val">24ms</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- MAIN CONTENT -->
+        <main class="flex-1 flex flex-col h-full relative z-10 min-w-0">
+            
+            <!-- Header -->
+            <header class="h-16 border-b border-cyber-border bg-cyber-black/80 backdrop-blur flex items-center justify-between px-6 shrink-0">
+                <div class="flex items-center gap-2">
+                    <div class="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                    <span class="text-xs tracking-widest text-cyber-dim">LIVE SESSION: <span id="session-id" class="text-cyber-text">INIT...</span></span>
+                </div>
+                <button onclick="clearChat()" class="text-xs text-cyber-dim hover:text-red-400 flex items-center gap-1 transition-colors">
+                    <i data-lucide="trash-2" class="w-3 h-3"></i> CLEAR LOGS
+                </button>
+            </header>
+
+            <!-- Chat Area -->
+            <div id="chat-container" class="flex-1 overflow-y-auto p-4 md:p-8 space-y-6 scroll-smooth">
+                <!-- Welcome Message -->
+                <div class="flex gap-4 max-w-3xl mx-auto opacity-80">
+                    <div class="w-8 h-8 rounded bg-cyber-blue/10 flex items-center justify-center border border-cyber-blue shrink-0">
+                        <i data-lucide="bot" class="w-5 h-5 text-cyber-blue"></i>
+                    </div>
+                    <div class="space-y-1">
+                        <span class="text-xs text-cyber-blue font-bold">SYSTEM</span>
+                        <div class="text-sm text-cyber-text leading-relaxed p-3 bg-cyber-panel border border-cyber-border rounded-lg rounded-tl-none">
+                            System initialized. Knowledge base active. Ready for queries.<br>
+                            <span class="text-cyber-dim text-xs">Upload a PDF in the sidebar to begin RAG operations.</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Dynamic Chat Content will be injected here -->
+                <div id="messages-area" class="max-w-3xl mx-auto space-y-6 pb-20"></div>
+            </div>
+
+            <!-- Example Questions (Overlay) -->
+            <div id="examples-area" class="absolute bottom-24 left-0 right-0 z-20 pointer-events-none">
+                <div class="max-w-3xl mx-auto px-4 flex flex-wrap gap-2 justify-center">
+                    <button onclick="sendExample('What is the main topic of the uploaded document?')" class="pointer-events-auto bg-cyber-panel/90 backdrop-blur border border-cyber-border hover:border-cyber-purple text-xs text-cyber-text py-2 px-4 rounded-full transition-all hover:-translate-y-1 shadow-lg">
+                        What is the main topic?
+                    </button>
+                    <button onclick="sendExample('Summarize the document in three bullet points.')" class="pointer-events-auto bg-cyber-panel/90 backdrop-blur border border-cyber-border hover:border-cyber-purple text-xs text-cyber-text py-2 px-4 rounded-full transition-all hover:-translate-y-1 shadow-lg">
+                        Summarize in 3 bullets
+                    </button>
+                    <button onclick="sendExample('What are the latest trends in AI?')" class="pointer-events-auto bg-cyber-panel/90 backdrop-blur border border-cyber-border hover:border-cyber-purple text-xs text-cyber-text py-2 px-4 rounded-full transition-all hover:-translate-y-1 shadow-lg">
+                        Latest trends in AI?
+                    </button>
+                </div>
+            </div>
+
+            <!-- Input Area -->
+            <div class="p-4 bg-cyber-black border-t border-cyber-border shrink-0">
+                <div class="max-w-3xl mx-auto relative neon-border rounded-lg bg-cyber-panel">
+                    <input type="text" id="user-input" 
+                        class="w-full bg-transparent text-cyber-text p-4 pr-12 outline-none font-mono text-sm placeholder-cyber-dim"
+                        placeholder="Enter command or query..."
+                        onkeypress="handleEnter(event)">
+                    <button onclick="sendMessage()" id="send-btn" class="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-cyber-blue hover:text-white transition-colors">
+                        <i data-lucide="send" class="w-5 h-5"></i>
+                    </button>
+                </div>
+                <div class="text-center mt-2">
+                    <span class="text-[10px] text-cyber-dim">AI reasoning engine enabled. Responses may vary.</span>
+                </div>
+            </div>
+        </main>
+
+        <!-- RIGHT PANEL: TRACE EVENTS (Collapsible on mobile) -->
+        <aside class="hidden xl:flex flex-col w-96 border-l border-cyber-border bg-cyber-dark/50 backdrop-blur h-full">
+            <div class="p-4 border-b border-cyber-border bg-cyber-panel/50 shrink-0">
+                <h3 class="text-xs font-bold text-cyber-purple flex items-center gap-2">
+                    <i data-lucide="activity" class="w-4 h-4"></i> AGENT THOUGHT PROCESS
+                </h3>
+            </div>
+            <div id="trace-container" class="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs">
+                <div class="text-center text-cyber-dim italic mt-10">
+                    Waiting for agent execution trace...
+                </div>
+            </div>
+        </aside>
+
+    </div>
+
+    <!-- FULL WIDTH FOOTER -->
+    <footer class="h-8 bg-cyber-black border-t border-cyber-border flex items-center justify-between px-4 text-[10px] text-cyber-dim select-none shrink-0 z-50 w-full">
+        <div class="flex items-center gap-2">
+            <span class="text-cyber-blue">NEURAL INTERFACE</span>
+            <span class="opacity-50">@</span>
+            <span>V2.0.4</span>
+        </div>
+        <div class="flex items-center gap-4">
+            <span class="hover:text-cyber-green cursor-pointer transition-colors">STATUS: OPTIMAL</span>
+            <span class="hover:text-cyber-purple cursor-pointer transition-colors">ENCRYPTED</span>
+        </div>
+    </footer>
+
+    <!-- JS Logic -->
+    <script>
+        // --- CONFIGURATION ---
+        const API_BASE_URL = "http://127.0.0.1:8000";
+        let state = {
+            sessionId: crypto.randomUUID(),
+            webSearchEnabled: true,
+            isProcessing: false,
+            messages: []
+        };
+
+        // --- INITIALIZATION ---
+        document.addEventListener('DOMContentLoaded', () => {
+            lucide.createIcons();
+            document.getElementById('session-id').textContent = state.sessionId.slice(0, 8).toUpperCase();
+            
+            // Random Latency Simulation for UI
+            setInterval(() => {
+                document.getElementById('latency-val').textContent = Math.floor(Math.random() * 50 + 20) + "ms";
+            }, 2000);
+        });
+
+        // --- UI HANDLERS ---
+        function toggleWebSearch() {
+            state.webSearchEnabled = !state.webSearchEnabled;
+            const toggleBtn = document.getElementById('web-search-toggle');
+            const toggleDot = toggleBtn.querySelector('div');
+            
+            if (state.webSearchEnabled) {
+                toggleBtn.classList.replace('bg-cyber-dim', 'bg-cyber-blue');
+                toggleBtn.classList.add('bg-cyber-blue');
+                toggleDot.classList.replace('left-1', 'right-1'); // Simple class toggle logic needed
+                // Resetting manual styles for simplicity
+                toggleBtn.style.backgroundColor = '#00f3ff'; 
+                toggleDot.style.transform = 'translateX(0)';
+            } else {
+                toggleBtn.style.backgroundColor = '#333';
+                toggleDot.style.transform = 'translateX(-20px)';
+            }
+        }
+
+        function handleFileSelect(input) {
+            const label = document.getElementById('file-label');
+            if (input.files && input.files[0]) {
+                label.innerHTML = `
+                    <i data-lucide="file-text" class="w-6 h-6 mx-auto text-cyber-green mb-2"></i>
+                    <span class="text-xs text-cyber-green font-bold">${input.files[0].name}</span>
+                `;
+                lucide.createIcons();
+                document.getElementById('drop-zone').classList.add('border-cyber-green');
+            }
+        }
+
+        async function uploadDocument() {
+            const fileInput = document.getElementById('pdf-upload');
+            const statusDiv = document.getElementById('upload-status');
+            const btn = document.getElementById('upload-btn');
+
+            if (!fileInput.files[0]) {
+                showStatus('Select a PDF first', 'text-red-500');
+                return;
+            }
+
+            // UI Loading
+            btn.disabled = true;
+            btn.innerHTML = '<div class="loader"></div> Processing...';
+            showStatus('', '');
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('session_id', state.sessionId);
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/upload-document/`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) throw new Error('Upload failed');
+
+                const data = await response.json();
+                showStatus('Ingestion Complete', 'text-cyber-green');
+                // Add system message
+                addMessage('assistant', `Successfully ingested knowledge base: **${data.filename || fileInput.files[0].name}**`);
+            } catch (error) {
+                console.error(error);
+                showStatus('Upload Error', 'text-red-500');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = '<i data-lucide="zap" class="w-3 h-3"></i> INGEST DATA';
+                lucide.createIcons();
+            }
+        }
+
+        function showStatus(msg, colorClass) {
+            const div = document.getElementById('upload-status');
+            div.textContent = msg;
+            div.className = `mt-2 text-xs text-center ${colorClass}`;
+            div.classList.remove('hidden');
+        }
+
+        // --- CHAT LOGIC ---
+        function handleEnter(e) {
+            if (e.key === 'Enter') sendMessage();
+        }
+
+        function sendExample(text) {
+            document.getElementById('user-input').value = text;
+            sendMessage();
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('user-input');
+            const text = input.value.trim();
+            if (!text || state.isProcessing) return;
+
+            // Hide examples once chat starts
+            document.getElementById('examples-area').style.display = 'none';
+
+            // 1. Add User Message
+            addMessage('user', text);
+            input.value = '';
+            state.isProcessing = true;
+            
+            // 2. Add Thinking Placeholder
+            const thinkingId = addThinkingBubble();
+
+            // 3. API Call
+            try {
+                const response = await fetch(`${API_BASE_URL}/chat/`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        session_id: state.sessionId,
+                        query: text,
+                        enable_web_search: state.webSearchEnabled
+                    })
+                });
+
+                if (!response.ok) throw new Error('API Error');
+
+                const data = await response.json();
+                
+                // Remove thinking, add response
+                removeThinkingBubble(thinkingId);
+                addMessage('assistant', data.response);
+                
+                // Render Trace
+                renderTraceEvents(data.trace_events);
+
+            } catch (error) {
+                console.error(error);
+                removeThinkingBubble(thinkingId);
+                addMessage('assistant', "⚠️ Connection Error: Unable to reach neural backend.");
+            } finally {
+                state.isProcessing = false;
+            }
+        }
+
+        function addMessage(role, text) {
+            const container = document.getElementById('messages-area');
+            const isUser = role === 'user';
+            
+            const div = document.createElement('div');
+            div.className = `flex gap-4 ${isUser ? 'flex-row-reverse' : ''} animate-[fadeIn_0.3s_ease-out]`;
+            
+            const iconColor = isUser ? 'bg-cyber-purple/20 border-cyber-purple' : 'bg-cyber-blue/20 border-cyber-blue';
+            const icon = isUser ? 'user' : 'bot';
+            const textColor = isUser ? 'text-cyber-purple' : 'text-cyber-blue';
+            const bubbleStyle = isUser 
+                ? 'bg-cyber-purple/10 border border-cyber-purple/50 text-cyber-text' 
+                : 'bg-cyber-panel border border-cyber-border text-cyber-text';
+
+            // Convert simple Markdown to HTML
+            const formattedText = parseMarkdown(text);
+
+            div.innerHTML = `
+                <div class="w-8 h-8 rounded flex items-center justify-center border shrink-0 ${iconColor}">
+                    <i data-lucide="${icon}" class="w-4 h-4 ${textColor}"></i>
+                </div>
+                <div class="space-y-1 max-w-[85%]">
+                    <span class="text-xs ${textColor} font-bold uppercase">${role}</span>
+                    <div class="p-3 rounded-lg text-sm leading-relaxed prose ${bubbleStyle} rounded-t${isUser?'r':'l'}-none">
+                        ${formattedText}
+                    </div>
+                </div>
+            `;
+            
+            container.appendChild(div);
+            lucide.createIcons();
+            
+            // Auto scroll
+            const chatContainer = document.getElementById('chat-container');
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
+
+        function addThinkingBubble() {
+            const container = document.getElementById('messages-area');
+            const id = 'thinking-' + Date.now();
+            
+            const div = document.createElement('div');
+            div.id = id;
+            div.className = `flex gap-4`;
+            div.innerHTML = `
+                <div class="w-8 h-8 rounded flex items-center justify-center border shrink-0 bg-cyber-blue/20 border-cyber-blue">
+                    <i data-lucide="loader-2" class="w-4 h-4 text-cyber-blue animate-spin"></i>
+                </div>
+                <div class="space-y-1">
+                    <span class="text-xs text-cyber-blue font-bold">SYSTEM</span>
+                    <div class="text-xs text-cyber-dim animate-pulse pt-2">Processing neural pathways...</div>
+                </div>
+            `;
+            container.appendChild(div);
+            lucide.createIcons();
+            return id;
+        }
+
+        function removeThinkingBubble(id) {
+            const el = document.getElementById(id);
+            if (el) el.remove();
+        }
+
+        function clearChat() {
+            document.getElementById('messages-area').innerHTML = '';
+            document.getElementById('trace-container').innerHTML = '<div class="text-center text-cyber-dim italic mt-10">Waiting for agent execution trace...</div>';
+            document.getElementById('examples-area').style.display = 'block';
+            state.sessionId = crypto.randomUUID(); // Reset session on clear
+        }
+
+        // --- TRACE RENDERER ---
+        function renderTraceEvents(events) {
+            const container = document.getElementById('trace-container');
+            if (!events || events.length === 0) return;
+            
+            container.innerHTML = ''; // Clear previous trace for this turn
+            
+            const iconMap = {
+                'router': 'compass',
+                'rag_lookup': 'book-open',
+                'web_search': 'globe',
+                'answer': 'lightbulb',
+                '__end__': 'check-circle'
+            };
+
+            events.forEach((event, index) => {
+                const iconName = iconMap[event.node_name] || 'cpu';
+                
+                const card = document.createElement('div');
+                card.className = 'bg-cyber-black border border-cyber-border rounded p-3 text-xs mb-2 hover:border-cyber-purple transition-colors group';
+                
+                let detailsHtml = '';
+                if (event.details) {
+                    // Extract key details based on logic from python file
+                    if (event.details.sufficiency_verdict) {
+                        const color = event.details.sufficiency_verdict === "Sufficient" ? 'text-green-400' : 'text-yellow-400';
+                        detailsHtml += `<div class="mt-2 pt-2 border-t border-dashed border-gray-800 ${color}">Verdict: ${event.details.sufficiency_verdict}</div>`;
+                    }
+                    if (event.details.retrieved_content_summary) {
+                        detailsHtml += `<div class="mt-1 text-gray-500 truncate" title="${event.details.retrieved_content_summary}">Retrieved: ${event.details.retrieved_content_summary}</div>`;
+                    }
+                    if (event.details.router_override_reason) {
+                        detailsHtml += `<div class="mt-1 text-purple-400">Override: ${event.details.router_override_reason}</div>`;
+                    }
+                }
+
+                card.innerHTML = `
+                    <div class="flex items-center gap-2 mb-1">
+                        <i data-lucide="${iconName}" class="w-3 h-3 text-cyber-purple"></i>
+                        <span class="font-bold text-cyber-blue uppercase tracking-wider">${event.node_name}</span>
+                        <span class="ml-auto text-[10px] text-gray-600">STEP ${event.step}</span>
+                    </div>
+                    <div class="text-gray-400 pl-5 border-l border-gray-800 ml-1.5">
+                        ${event.description}
+                    </div>
+                    ${detailsHtml}
+                `;
+                container.appendChild(card);
+            });
+            lucide.createIcons();
+            
+            // Mobile: Scroll into view if needed
+            // container.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        // Simple Markdown Parser replacement
+        function parseMarkdown(text) {
+            if (!text) return '';
+            let html = text
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') // Bold
+                .replace(/`(.*?)`/g, '<code>$1</code>') // Inline Code
+                .replace(/\n/g, '<br>'); // Line breaks
+            return html;
+        }
+
+    </script>
+</body>
+</html>

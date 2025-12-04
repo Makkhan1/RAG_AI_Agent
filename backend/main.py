@@ -56,6 +56,10 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
 
 # --- Endpoints ---
 
+@app.get("/health")
+async def root():
+    return {"status": "ok", "message": "RAG Agent Backend is running"}
+
 @app.get("/")
 async def root():
     return {"status": "ok", "message": "RAG Agent Backend is running"}

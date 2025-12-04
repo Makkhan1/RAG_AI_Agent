@@ -1,23 +1,22 @@
-# # rag_agent_app/backend/agent.py
-
 import os
 from typing import List, Literal, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_tavily import TavilySearch
+from langchain_pinecone import PineconeVectorStore
 from pydantic import BaseModel, Field
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.runnables import RunnableConfig
 
-# Import API keys from config
-from .config import GROQ_API_KEY, TAVILY_API_KEY
-from .vectorstore import get_retriever
+# --- ABSOLUTE IMPORTS ---
+from config import GEMINI_API_KEY, TAVILY_API_KEY
+from vectorstore import get_retriever, pc, INDEX_NAME, embeddings
 
 # --- Tools ---
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
-tavily = TavilySearch(max_results=3, topic="general")
+tavily = TavilySearch(max_results=2, topic="general")
 
 @tool
 def web_search_tool(query: str) -> str:
@@ -38,10 +37,21 @@ def web_search_tool(query: str) -> str:
         return f"WEB_ERROR::{e}"
 
 @tool
-def rag_search_tool(query: str) -> str:
+def rag_search_tool(query: str, config: RunnableConfig) -> str:
     """Top-K chunks from KB (empty string if none)"""
     try:
-        retriever_instance = get_retriever()
+        # --- FIX: Re-enable Session Isolation ---
+        # We extract the session_id (passed as thread_id) and use it as the namespace.
+        # This ensures we only search documents belonging to THIS session.
+        session_id = config.get("configurable", {}).get("thread_id")
+        
+        vectorstore = PineconeVectorStore(
+            index_name=INDEX_NAME, 
+            embedding=embeddings,
+            namespace=session_id  # Search ONLY within this session's data
+        )
+        retriever_instance = vectorstore.as_retriever()
+        
         docs = retriever_instance.invoke(query, k=10)
         return "\n\n".join(d.page_content for d in docs) if docs else ""
     except Exception as e:
@@ -55,27 +65,36 @@ class RouteDecision(BaseModel):
 class RagJudge(BaseModel):
     sufficient: bool = Field(..., description="True if retrieved information is sufficient to answer the user's question, False otherwise.")
 
-# --- LLM instances with structured output where needed ---
-os.environ["GROQ_API_KEY"] = GROQ_API_KEY
+# --- GEMINI LLM SETUP WITH FALLBACK ---
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY is missing in environment variables.")
 
+os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
 
-router_llm = ChatOpenAI(
-    model_name="meta-llama/llama-3.3-8b-instruct:free",
-    openai_api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-).with_structured_output(RouteDecision)
-
-judge_llm = ChatOpenAI(
-    model_name="meta-llama/llama-3.3-8b-instruct:free",
-    openai_api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
-).with_structured_output(RagJudge)
-
-answer_llm = ChatOpenAI(
-    model_name="meta-llama/llama-3.3-8b-instruct:free",
-    openai_api_key=os.getenv("GROQ_API_KEY"),
-    base_url="https://openrouter.ai/api/v1"
+# Set max_retries=1 to fail fast and trigger the fallback model immediately
+gemini_primary = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash-lite",
+    temperature=0,
+    max_retries=1
 )
+
+gemini_secondary = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
+    temperature=0,
+    max_retries=1
+)
+
+gemini_tertiary = ChatGoogleGenerativeAI(
+    model="gemini-2.5-flash",
+    temperature=0,
+    max_retries=3
+)
+
+llm_with_fallback = gemini_primary.with_fallbacks([gemini_secondary, gemini_tertiary])
+
+router_llm = llm_with_fallback.with_structured_output(RouteDecision)
+judge_llm = llm_with_fallback.with_structured_output(RagJudge)
+answer_llm = llm_with_fallback
 
 # --- Shared state type ---
 class AgentState(TypedDict, total=False):
@@ -84,84 +103,102 @@ class AgentState(TypedDict, total=False):
     rag: str
     web: str
     web_search_enabled: bool
-    rag_verdict_is_sufficient: bool # <-- CHANGED: Added for accurate tracing
+    rag_verdict_is_sufficient: bool
+    has_documents: bool
 
 # --- Node 1: router (decision) ---
 def router_node(state: AgentState, config: RunnableConfig) -> AgentState:
-    print("\n--- Entering router_node ---")
+    print("\n--- Entering router_node (Gemini) ---")
     query = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
+    
+    # Extract configuration
     web_search_enabled = config.get("configurable", {}).get("web_search_enabled", True)
-    print(f"Router received web search info : {web_search_enabled}")
- 
+    session_id = config.get("configurable", {}).get("thread_id")
+    
+    # --- CHECK PINECONE STATS (SESSION SPECIFIC) ---
+    has_documents = False
+    try:
+        index = pc.Index(INDEX_NAME)
+        stats = index.describe_index_stats()
+        
+        # --- FIX: Check Specific Namespace ---
+        # We only check if documents exist in the namespace matching the current session_id.
+        if "namespaces" in stats and session_id in stats["namespaces"]:
+            if stats["namespaces"][session_id].vector_count > 0:
+                has_documents = True
+        
+        print(f"Session {session_id} Stats: has_docs={has_documents}")
+    except Exception as e:
+        print(f"Warning: Could not check index stats: {e}. Defaulting to False.")
+    
+    print(f"Router config: web_search={web_search_enabled}, has_documents={has_documents}")
+
+    # 2. CONSTRUCT SYSTEM PROMPT
     system_prompt = (
         "You are an intelligent routing agent designed to direct user queries to the most appropriate tool."
         "Your primary goal is to provide accurate and relevant information by selecting the best source."
-        "Prioritize using the **internal knowledge base (RAG)** for factual information that is likely "
-        "to be contained within pre-uploaded documents or for common, well-established facts."
     )
-    
-    if web_search_enabled:
+
+    if has_documents:
         system_prompt += (
-            "You **CAN** use web search for queries that require very current, real-time, or broad general knowledge "
-            "that is unlikely to be in a specific, static knowledge base (e.g., today's news, live data, very recent events)."
-            "\n\nChoose one of the following routes:"
-            "\n- 'rag': For queries about specific entities, historical facts, product details, procedures, or any information that would typically be found in a curated document collection (e.g., 'What is X?', 'How does Y work?', 'Explain Z policy')."
-            "\n- 'web': For queries about current events, live data, very recent news, or broad general knowledge that requires up-to-date internet access (e.g., 'Who won the election yesterday?', 'What is the weather in London?', 'Latest news on technology')."
+            "\nPrioritize using the **internal knowledge base (RAG)** for factual information, "
+            "summaries, and questions about the document's content (e.g., 'What is this about?', 'Main topic?', 'Summarize')."
         )
     else:
+        system_prompt += "\n**NOTICE: The Knowledge Base is currently EMPTY.** You CANNOT use the 'rag' route."
+
+    if web_search_enabled:
         system_prompt += (
-            "**Web search is currently DISABLED.** You **MUST NOT** choose the 'web' route."
-            "If a query would normally require web search, you should attempt to answer it using RAG (if applicable) or directly from your general knowledge."
-            "\n\nChoose one of the following routes:"
-            "\n- 'rag': For queries about specific entities, historical facts, product details, procedures, or any information that would typically be found in a curated document collection, AND for queries that would normally go to web search but web search is disabled."
-            "\n- 'answer': For very simple, direct questions you can answer without any external lookup (e.g., 'What is your name?')."
+            "\nYou **CAN** use web search for queries that require very current, real-time, or broad general knowledge."
+            "\nRoutes: 'rag', 'web', 'answer', 'end'."
         )
+        if not has_documents:
+             system_prompt += "\nSince KB is empty, if the user asks for information, default to 'web'."
+    else:
+        system_prompt += (
+            "\n**Web search is currently DISABLED.** You **MUST NOT** choose the 'web' route."
+            "\nRoutes: 'rag', 'answer', 'end'."
+        )
+        if not has_documents:
+             system_prompt += "\nSince KB is empty and Web is disabled, you must use 'answer' and rely on your own knowledge."
 
     system_prompt += (
-        "\n- 'answer': For very simple, direct questions you can answer without any external lookup (e.g., 'What is your name?')."
-        "\n- 'end': For pure greetings or small-talk where no factual answer is expected (e.g., 'Hi', 'How are you?'). If choosing 'end', you MUST provide a 'reply'."
-        "\n\nExample routing decisions:"
-        "\n- User: 'What are the treatment of diabetes?' -> Route: 'rag' (Factual knowledge, likely in KB)."
-        "\n- User: 'What is the capital of France?' -> Route: 'rag' (Common knowledge, can be in KB or answered directly if LLM knows)."
-        "\n- User: 'Who won the NBA finals last night?' -> Route: 'web' (Current event, requires live data)."
-        "\n- User: 'How do I submit an expense report?' -> Route: 'rag' (Internal procedure)."
-        "\n- User: 'Tell me about quantum computing.' -> Route: 'rag' (Foundational knowledge can be in KB. If KB is sparse, judge will route to web if enabled)."
-        "\n- User: 'Hello there!' -> Route: 'end', reply='Hello! How can I assist you today?'"
+        "\n'answer': For simple direct questions or math."
+        "\n'end': For greetings/small talk. Must provide a reply."
     )
 
-    system_prompt += (
-    "\n\nFor mathematical problems and calculations:"
-    "\n- 'answer': For basic arithmetic, simple algebra, standard mathematical concepts, or problems you can solve directly (e.g., 'What is 25 + 37?', 'Solve for x: 2x + 5 = 15', 'What is the derivative of x²?')."
-    "\n- 'rag': For complex mathematical problems, mathematical theorems, proofs, or detailed mathematical procedures that might benefit from knowledge base content (e.g., 'Explain the proof of Pythagorean theorem', 'How to solve quadratic equations?', 'What are the applications of calculus in physics?')."
-    "\n- Avoid 'web' for mathematical problems unless they involve very recent mathematical discoveries, current mathematical competitions, or time-sensitive mathematical events."
-    "\n\nMathematical routing examples:"
-    "\n- User: 'What is 123 × 456?' -> Route: 'answer' (Basic arithmetic)."
-    "\n- User: 'Solve: 3x² - 12x + 9 = 0' -> Route: 'answer' (Standard algebra)."
-    "\n- User: 'Explain integration by parts' -> Route: 'rag' (Mathematical concept that benefits from detailed explanation)."
-    "\n- User: 'What is the binomial theorem?' -> Route: 'rag' (Mathematical theorem)."
-    "\n- User: 'Calculate the standard deviation of [2, 4, 6, 8, 10]' -> Route: 'answer' (Standard calculation)."
-    "\n- User: 'How do you prove that √2 is irrational?' -> Route: 'rag' (Mathematical proof)."
-    "\n- User: 'What is 15% of 240?' -> Route: 'answer' (Simple percentage calculation)."
-    "\n- User: 'Explain the fundamental theorem of calculus' -> Route: 'rag' (Complex mathematical concept)."
-)
-
     messages = [("system", system_prompt), ("user", query)]
+    
     result: RouteDecision = router_llm.invoke(messages)
     
     initial_router_decision = result.route
     router_override_reason = None
 
+    # Logic Override: If LLM chooses RAG but we know it's empty
+    if result.route == "rag" and not has_documents:
+        if web_search_enabled:
+            result.route = "web"
+            router_override_reason = "Knowledge Base is empty; redirected to Web Search."
+        else:
+            result.route = "answer"
+            router_override_reason = "Knowledge Base is empty and Web is disabled; redirected to LLM Answer."
+        print(f"Router decision overridden: {router_override_reason}")
+
+    # Logic Override: If User disabled Web but LLM chose Web
     if not web_search_enabled and result.route == "web":
-        result.route = "rag" 
-        router_override_reason = "Web search disabled by user; redirected to RAG."
-        print(f"Router decision overridden: changed from 'web' to 'rag' because web search is disabled.")
-    
-    print(f"Router final decision: {result.route}, Reply (if 'end'): {result.reply}")
+        result.route = "rag" if has_documents else "answer"
+        router_override_reason = "Web search disabled by user; redirected to fallback."
+        print(f"Router decision overridden: changed from 'web' to '{result.route}' because web search is disabled.")
     
     out = {
         "messages": state["messages"], 
         "route": result.route,
-        "web_search_enabled": web_search_enabled
+        "web_search_enabled": web_search_enabled,
+        "has_documents": has_documents,
+        # --- FIX: Clear Context at start of every turn ---
+        "rag": "", 
+        "web": "",
+        "rag_verdict_is_sufficient": False
     }
     if router_override_reason:
         out["initial_router_decision"] = initial_router_decision
@@ -178,45 +215,43 @@ def rag_node(state: AgentState, config: RunnableConfig) -> AgentState:
     print("\n--- Entering rag_node ---")
     query = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
     web_search_enabled = config.get("configurable", {}).get("web_search_enabled", True)
-    print(f"RAG query: {query}")
-    chunks = rag_search_tool.invoke(query)
     
-    if chunks.startswith("RAG_ERROR::"):
-        print(f"RAG Error: {chunks}. Checking web search enabled status.")
+    # Invoke tool with config to pass thread_id/namespace
+    chunks = rag_search_tool.invoke(query, config=config)
+    
+    # 1. EMPTY RAG CHECK (Optimization)
+    if not chunks or chunks.startswith("RAG_ERROR::"):
+        print("RAG returned no chunks or error. Skipping judge.")
         next_route = "web" if web_search_enabled else "answer"
-        return {**state, "rag": "", "route": next_route}
+        return {
+            **state, 
+            "rag": "", 
+            "route": next_route,
+            "rag_verdict_is_sufficient": False
+        }
 
-    if chunks:
-        print(f"Retrieved RAG chunks (first 500 chars): {chunks[:500]}...")
-    else:
-        print("No RAG chunks retrieved.")
-
+    # 2. JUDGE
     judge_messages = [
         ("system", (
             "You are a judge evaluating if the **retrieved information** is **sufficient and relevant** "
             "to fully and accurately answer the user's question. "
-            "If the information is incomplete, vague, or doesn't directly answer the question, it's NOT sufficient."
-            "If it provides a clear, direct, and comprehensive answer, it IS sufficient."
-            "If no relevant information was retrieved at all, it is definitely NOT sufficient."
             "\n\nRespond ONLY with a JSON object: {\"sufficient\": true/false}"
         )),
         ("user", f"Question: {query}\n\nRetrieved info: {chunks}\n\nIs this sufficient to answer the question?")
     ]
     verdict: RagJudge = judge_llm.invoke(judge_messages)
-    print(f"RAG Judge verdict: {verdict.sufficient}")
     
     if verdict.sufficient:
         next_route = "answer"
     else:
         next_route = "web" if web_search_enabled else "answer"
-        print(f"RAG not sufficient. Web search enabled: {web_search_enabled}. Next route: {next_route}")
 
     print("--- Exiting rag_node ---")
     return {
         **state,
         "rag": chunks,
         "route": next_route,
-        "rag_verdict_is_sufficient": verdict.sufficient, # <-- CHANGED: Pass the real verdict
+        "rag_verdict_is_sufficient": verdict.sufficient,
         "web_search_enabled": web_search_enabled
     }
 
@@ -227,17 +262,13 @@ def web_node(state: AgentState, config: RunnableConfig) -> AgentState:
     web_search_enabled = config.get("configurable", {}).get("web_search_enabled", True)
     
     if not web_search_enabled:
-        print("Web search node entered but web search is disabled. Skipping actual search.")
         return {**state, "web": "Web search was disabled by the user.", "route": "answer"}
 
-    print(f"Web search query: {query}")
     snippets = web_search_tool.invoke(query)
     
     if snippets.startswith("WEB_ERROR::"):
-        print(f"Web Error: {snippets}. Proceeding to answer with limited info.")
         return {**state, "web": "", "route": "answer"}
 
-    print(f"Web snippets retrieved: {snippets[:200]}...")
     print("--- Exiting web_node ---")
     return {**state, "web": snippets, "route": "answer"}
 
@@ -247,6 +278,7 @@ def answer_node(state: AgentState) -> AgentState:
     user_q = next((m.content for m in reversed(state["messages"]) if isinstance(m, HumanMessage)), "")
     
     ctx_parts = []
+    # Note: State is now fresh, so these will only exist if populated in THIS turn
     if state.get("rag"):
         ctx_parts.append("Knowledge Base Information:\n" + state["rag"])
     if state.get("web"):
@@ -255,31 +287,34 @@ def answer_node(state: AgentState) -> AgentState:
     
     context = "\n\n".join(ctx_parts).strip()
     
-    # <-- CHANGED: New, stricter prompt to prevent answering from general knowledge -->
     if not context:
-        prompt = f"""You are a helpful assistant. The user asked a question, but you were unable to find any relevant information in your knowledge base or on the web.
-You MUST inform the user that you do not have enough information to answer their question. Do not try to answer it from your own memory.
+        # Check if we should refuse based on user settings (No Docs + No Web)
+        has_documents = state.get("has_documents", False)
+        web_search_enabled = state.get("web_search_enabled", True)
+        
+        if not has_documents and not web_search_enabled:
+            print("Blocking answer from general knowledge as per policy (No Docs + No Web).")
+            return {
+                **state,
+                "messages": state["messages"] + [AIMessage(content="Please upload a document to the Knowledge Base or turn on Web Search to proceed.")]
+            }
+
+        prompt = f"""You are a helpful assistant. 
+The user asked a question, but you have no access to external tools (Web/RAG) or they returned no results.
+Please answer the question to the best of your ability using your general knowledge.
 
 Question: {user_q}
 """
     else:
         prompt = f"""You are a helpful assistant that answers questions based ONLY on the provided context.
-If the provided context does not contain the information needed to answer the question, you MUST state that you do not have enough information to answer.
-DO NOT use any of your own internal knowledge or information you were trained on.
-
 Context:
 ---
 {context}
 ---
-
-Based strictly on the context above, answer the following question.
-
 Question: {user_q}
 """
 
-    print(f"Prompt sent to answer_llm: {prompt[:500]}...")
     ans = answer_llm.invoke([HumanMessage(content=prompt)]).content
-    print(f"Final answer generated: {ans[:200]}...")
     print("--- Exiting answer_node ---")
     return {
         **state,
@@ -293,12 +328,8 @@ def from_router(st: AgentState) -> Literal["rag", "web", "answer", "end"]:
 def after_rag(st: AgentState) -> Literal["answer", "web"]:
     return st["route"]
 
-def after_web(_) -> Literal["answer"]:
-    return "answer"
-
 # --- Build graph ---
 def build_agent():
-    """Builds and compiles the LangGraph agent."""
     g = StateGraph(AgentState)
     g.add_node("router", router_node)
     g.add_node("rag_lookup", rag_node)

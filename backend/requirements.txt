@@ -13,3 +13,4 @@ langchain-tavily
 langgraph
 pinecone-client
 pypdf
+langchain-google-genai

@@ -8,12 +8,13 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the backend code into the container
+# Copy the source code into the container
+# Since this Dockerfile is inside 'backend/', COPY . . puts all python files directly in /app
 COPY . .
 
-# Expose the port the app runs on (this is just documentation, the actual port is set by $PORT)
+# Expose the port
 EXPOSE 8000
 
 # Command to run the application
-# Use $PORT environment variable that Render provides
-CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Note: 'main:app' instead of 'backend.main:app' because main.py is now in the root of /app
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]

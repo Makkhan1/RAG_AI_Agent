@@ -10,7 +10,7 @@ PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT","us-east-1")
 PINECONE_INDEX_NAME = os.getenv("PINECONE_INDEX_NAME", "rag-index") 
 
 # Groq
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Tavily
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")

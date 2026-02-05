@@ -14,3 +14,5 @@ langgraph
 pinecone-client
 pypdf
 langchain-google-genai
+langchain-groq==1.1.1
+groq-langchain>=0.3.0

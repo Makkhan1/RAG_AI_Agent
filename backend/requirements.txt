@@ -15,4 +15,3 @@ pinecone-client
 pypdf
 langchain-google-genai
 langchain-groq
-groq-langchain

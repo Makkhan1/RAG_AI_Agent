@@ -29,6 +29,33 @@
     </script>
 
     <style>
+
+    #messages-area table { 
+    border-collapse: collapse; 
+    width: 100%; 
+    margin-bottom: 0.75rem; 
+    font-size: 12px;
+}
+#messages-area th { 
+    border: 1px solid #333; 
+    padding: 8px; 
+    background: #1a1a1a; 
+    color: #00f3ff; 
+    text-align: left;
+}
+#messages-area td { 
+    border: 1px solid #333; 
+    padding: 8px; 
+}
+#messages-area tr:nth-child(even) {
+    background: #0a0a0a;
+}
+        #messages-area p { margin-bottom: 0.75rem; }
+        #messages-area p:last-child { margin-bottom: 0; }
+        #messages-area ul { list-style-type: disc; margin-left: 1.5rem; margin-bottom: 0.75rem; }
+        #messages-area ol { list-style-type: decimal; margin-left: 1.5rem; margin-bottom: 0.75rem; }
+        #messages-area strong { color: #00f3ff; font-weight: 700; } /* Neon blue for bold text */
+        #messages-area code { background: #1a1a1a; padding: 2px 4px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; color: #bc13fe; }
         body { background-color: #050505; color: #e0e0e0; font-family: 'JetBrains Mono', monospace; overflow: hidden; }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: #0a0a0a; }
@@ -347,6 +374,7 @@
     </script>
 </body>
 </html>
+
 
 
 

@@ -17,7 +17,7 @@ from vectorstore import get_retriever, pc, INDEX_NAME, embeddings
 
 # --- Tools ---
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
-tavily = TavilySearch(max_results=2, topic="general")
+tavily = TavilySearch(max_results=5, search_depth="advanced")
 
 @tool
 def web_search_tool(query: str) -> str:
